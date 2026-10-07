@@ -1,0 +1,30 @@
+[package]
+name = "octopuscrawl-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "octopuscrawl-api"
+path = "src/main.rs"
+
+[features]
+default = []
+# Enables the real chromiumoxide crawl engine (heavy). Without it the server
+# runs the in-memory demo feed, so default builds stay fast.
+real = ["dep:octopuscrawl-crawler", "dep:octopuscrawl-ingest", "dep:octopuscrawl-queen"]
+
+[dependencies]
+octopuscrawl-core.workspace = true
+octopuscrawl-crawler = { path = "../crawler", optional = true }
+octopuscrawl-ingest = { path = "../ingest", optional = true }
+octopuscrawl-queen = { path = "../queen", optional = true }
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+futures-util.workspace = true

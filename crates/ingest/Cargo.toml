@@ -1,0 +1,17 @@
+[package]
+name = "octopuscrawl-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow = "1"
+# onig (oniguruma, built via the C toolchain) for the regex backend; skip the
+# C++ esaxx_fast and the progress bar, which BPE training does not need.
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+
+[[bin]]
+name = "itest"
+path = "src/bin/itest.rs"

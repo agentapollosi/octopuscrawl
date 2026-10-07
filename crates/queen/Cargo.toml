@@ -1,0 +1,17 @@
+[package]
+name = "octopuscrawl-queen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+serde.workspace = true
+serde_json.workspace = true
+candle-core = "0.8"
+candle-nn = "0.8"
+rand = "0.8"
+
+[[bin]]
+name = "queen-train"
+path = "src/bin/queen_train.rs"

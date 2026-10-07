@@ -1,0 +1,18 @@
+[Unit]
+Description=octopuscrawl API + crawler engine
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/octopuscrawl
+Environment=OCTOPUSCRAWL_CRAWL=1
+Environment=OCTOPUSCRAWL_CHROME=/usr/bin/google-chrome-stable
+# leave a core free for the crawler while the queen (re)trains
+Environment=RAYON_NUM_THREADS=3
+ExecStart=/root/octopuscrawl/target/release/octopuscrawl-api
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

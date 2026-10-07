@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+dist/
+.DS_Store
+*.log
+# local secrets / rpc keys — never commit
+.env
+config/secrets.toml
+
+# local / non-project files — not part of the repo
+/.claude/
+/docs/
+/mac-setup/
+/vscli.html
+
+# crawled dataset (generated, can be large) — never commit
+/data/

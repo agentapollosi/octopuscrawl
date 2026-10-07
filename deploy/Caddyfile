@@ -1,0 +1,12 @@
+# octopuscrawl — static site + API reverse proxy, with automatic HTTPS.
+octopuscrawl.net, www.octopuscrawl.net {
+	encode zstd gzip
+	handle /v1/* {
+		reverse_proxy 127.0.0.1:8787
+	}
+	handle {
+		root * /srv/octopuscrawl/web
+		try_files {path} /index.html
+		file_server
+	}
+}

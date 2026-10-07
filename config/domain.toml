@@ -1,0 +1,44 @@
+# octopuscrawl domain config — every domain-specific label lives here so the whole app
+# re-skins from one file. Swap this out and the crawler engine + UI change topic.
+
+brand = "octopuscrawl"
+tagline = "pretraining the first hacker-native LLM. from scratch. on nothing but what her tentacles read."
+model_name = "queen"            # the queen octopus; HF org below
+hf_org = "Octopuscrawl"
+
+[ui]
+score_column = "THREAT"         # label for the per-page relevance column
+score_help = "security value of the page, scored by the queen (0.00–1.00)"
+chat_placeholder = "ask anything security"
+chat_starters = ["what is CVSS?", "explain CWE-79", "what does a WAF do?"]
+reject_reason = "not security"  # order report rejection
+
+[chapters]
+# finite target lists; locked ones unlock as the treasury funds them
+order = ["advisories", "patches", "standards", "writeups", "tooling", "forums", "rfcs"]
+locked = ["forums", "rfcs"]
+
+# Public, legal-to-read security hosts the house crawlers seed from.
+[seeds]
+hosts = [
+  "nvd.nist.gov", "cve.org", "github.com/advisories", "msrc.microsoft.com",
+  "cisa.gov", "owasp.org", "attack.mitre.org", "cwe.mitre.org", "capec.mitre.org",
+  "portswigger.net/research", "googleprojectzero.blogspot.com", "isc.sans.edu",
+  "ubuntu.com/security/notices", "security.debian.org", "access.redhat.com/security",
+  "rfc-editor.org",
+]
+
+[policy]
+respect_robots = true
+block_paywall = true
+strip_pii = true
+reject = ["adult", "gambling", "scam"]
+# the engine only READS and documents; it never executes anything it reads.
+read_only = true
+
+[mascot]
+creature = "octopus"
+crawler_term = "hatchling"      # collective: "inklings"
+arms = 8                        # flexible tentacles (verlet), not IK legs
+ink_on_touch = true             # tentacle on a link => ink spreads
+palette = ["#05070f", "#0a1430", "#2ad4ff", "#ff5a7a", "#0b0b10"]  # deep-sea
