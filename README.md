@@ -61,4 +61,8 @@ target.
 
 ## License
 
-MIT
+**All rights reserved — source-available, not open source.**
+
+This repository is public so anyone can read the code and verify the project is
+genuine. You may **view** it; you may **not** copy, reuse, run, modify, or
+redistribute it without written permission. See [LICENSE](LICENSE).
