@@ -1,63 +1,72 @@
-# octopuscrawl
+<p align="center">
+  <img src="brand/icon.png" alt="octopuscrawl" width="104">
+</p>
 
-Pretraining the first hacker-native LLM — from scratch, on nothing but what her
-tentacles read. A queen octopus that gets security-savvy by **reading** published
-security knowledge (CVE/NVD advisories, patch notes, OWASP/MITRE, research
-writeups). The engine only reads public pages; it never attacks anything.
+<h1 align="center">octopuscrawl</h1>
 
-Built entirely in Rust.
+<p align="center">
+  Pretraining the first hacker-native LLM — from scratch, on nothing but what she reads.
+</p>
 
-## Workspace
+<p align="center">
+  <a href="https://octopuscrawl.net"><b>octopuscrawl.net →</b></a>
+</p>
 
-| Crate | What it is |
+---
+
+A queen octopus crawls the public security web — OWASP, MITRE ATT&CK, CWE/CAPEC,
+NVD advisories, PortSwigger, RFCs — and pretrains a language model on nothing but
+what her tentacles read. The engine only **reads** published pages; it never
+scans, attacks, or acts on anything it finds.
+
+Everything is live and watchable: pages loading in real time, a knowledge graph
+forming from the links she follows, a vocabulary growing as she reads, and a
+model — trained from random initialization on the corpus — that slowly learns to
+write.
+
+Built entirely in **Rust**.
+
+## What you can watch
+
+- **The crawl, live** — a canvas octopus sits on each real page and inks the
+  headings and text her tentacles reach, as the hatchlings read in chapters:
+  advisories, patches, standards, writeups, tooling, RFCs.
+- **Knowledge graph** — every page she reads becomes a node and every link she
+  follows an edge; the map grows and branches in real time.
+- **Forming vocabulary** — a BPE tokenizer she trains on the crawl itself; the
+  security subwords she learns to recognise, surfacing as she reads.
+- **The queen writes** — a small GPT pretrained from scratch on her corpus.
+  Crude at first, sharper the more she reads. The weights are downloadable.
+- **Open dataset** — every page she keeps, published as JSONL.
+- **On-chain treasury** — the project wallet, read live from Solana (balance and
+  activity), read-only.
+
+## How it's built
+
+A single Rust workspace carries the whole pipeline — from the crawl engine to the
+model to the live frontend:
+
+| Crate | Role |
 |---|---|
-| `crates/core` | Shared wire contract: data models + the `LiveMsg` WebSocket protocol. |
-| `crates/crawler` | Headless-Chromium crawl engine: reads public pages, returns a screenshot + link boxes. |
-| `crates/api` | Axum REST + WebSocket server; broadcasts live crawler / page / ledger events. |
-| `crates/web` | Leptos (WASM) frontend: the live octopus-over-document view, crawlers board, queen, treasury, order, manual. |
-| `config/domain.toml` | Every domain-specific label. Swap it to re-skin the whole app for another topic. |
+| `core` | Shared data models and the `LiveMsg` WebSocket protocol that ties everything together. |
+| `crawler` | Headless-Chromium engine: reads public pages, returns a screenshot and the on-page content boxes. |
+| `ingest` | Canonicalizes, deduplicates (SimHash), tokenizes (BPE) and stores each page into the dataset. |
+| `queen` | A from-scratch GPT (candle) pretrained on the corpus — training and text generation. |
+| `api` | Axum REST + WebSocket server; broadcasts live crawler, page, graph and treasury events. |
+| `web` | Leptos (WASM) frontend: the live octopus-over-document view, knowledge graph, queen, treasury. |
 
-## Run it
-
-Backend — demo feed (no browser needed). REST on `:8787`, WebSocket at `/v1/live`:
-
-```bash
-cargo run -p octopuscrawl-api
-```
-
-Backend — real crawl engine (needs Chrome installed; set `OCTOPUSCRAWL_CHROME` to override the path).
-On macOS, prefer [chrome-headless-shell](https://googlechromelabs.github.io/chrome-for-testing/)
-unpacked at `~/.local/share/chrome-headless-shell/current/` — it's picked up automatically and,
-unlike full Chrome, doesn't steal keyboard focus every time the crawler opens a page:
-
-```bash
-OCTOPUSCRAWL_CRAWL=1 cargo run -p octopuscrawl-api --features real
-```
-
-Frontend (serves on `:8080`, connects to the backend's WebSocket):
-
-```bash
-trunk serve --port 8080 crates/web/index.html
-```
-
-Open http://127.0.0.1:8080 with the backend running.
-
-## How it works
-
-Headless Chromium drives through public security pages in chapters: advisories,
-patches, standards, writeups, tooling. Each page becomes a screenshot plus the
-on-screen boxes of its links and headings; a canvas octopus is drawn over the
-real page and inks the text its tentacles reach. Links are followed within an
-allowlist of security hosts so coverage grows. Pages are cleaned, deduplicated
-and tokenized into the queen's dataset; each funded run retrains her from scratch
-and the weights ship public.
+The pipeline is **crawl → clean &amp; dedupe → tokenize → pretrain → generate**.
+Links are followed within an allowlist of security hosts, so coverage grows in
+finite, completable chapters; each funded run retrains the queen from scratch and
+the weights ship public.
 
 ## Guardrails
 
-Respect `robots.txt`; no paywall or bot-check bypass; strip PII before the
-dataset; reject adult / gambling / scam content. The engine only reads and
-documents — it never executes anything it reads, and never scans or attacks a
-target.
+The engine respects `robots.txt`, never bypasses a paywall or a bot check, strips
+PII before the dataset, and rejects non-security content. It reads both offense
+and defense knowledge — so the queen understands how a weakness works *and* how to
+defend against it — but it only ever **reads and documents**. It never executes,
+scans, or attacks anything.
 
 ## License
 
