@@ -29,7 +29,6 @@ pub fn Tile(id: String) -> impl IntoView {
     }
 
     let s_name = snap.clone();
-    let s_owner = snap.clone();
     let s_status = snap.clone();
     let s_letter = snap.clone();
     let s_host = snap.clone();
@@ -45,15 +44,6 @@ pub fn Tile(id: String) -> impl IntoView {
                 <div class="tile__row">
                     <span class="tile__name">
                         {move || s_name().map(|c| c.name).unwrap_or_default()}
-                        {move || s_owner().and_then(|c| c.owner).map(|o| {
-                            let n = o.chars().count();
-                            let short = if n > 8 {
-                                format!("{}…{}", o.chars().take(4).collect::<String>(), o.chars().skip(n - 4).collect::<String>())
-                            } else {
-                                o.clone()
-                            };
-                            view! { <span class="owned" title=o>"◆ "{short}</span> }
-                        })}
                     </span>
                     <span class=move || s_status().map(|c| status_cls(&c)).unwrap_or("s")>
                         {move || s_letter().map(|c| c.status.letter().to_string()).unwrap_or_default()}

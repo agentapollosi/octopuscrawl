@@ -23,9 +23,7 @@ const TABS: &[(&str, &str, &str)] = &[
     ("1", "crawlers", "/crawlers"),
     ("2", "map", "/map"),
     ("3", "queen", "/queen"),
-    ("4", "treasury", "/treasury"),
-    ("5", "join", "/join"),
-    ("6", "manual", "/man"),
+    ("4", "manual", "/man"),
 ];
 
 #[component]
@@ -54,8 +52,6 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/crawlers") view=CrawlersPage/>
                     <Route path=path!("/map") view=MapPage/>
                     <Route path=path!("/queen") view=QueenPage/>
-                    <Route path=path!("/treasury") view=TreasuryPage/>
-                    <Route path=path!("/join") view=JoinPage/>
                     <Route path=path!("/man") view=ManPage/>
                 </Routes>
             </main>
@@ -176,10 +172,9 @@ fn LivePage() -> impl IntoView {
                 </div>
                 <div class="hero__cta">
                     <A href="/queen" attr:class="btn btn--pri">"ask the queen →"</A>
-                    <A href="/join" attr:class="btn">"own a hatchling"</A>
+                    <A href="/map" attr:class="btn">"explore the map"</A>
                 </div>
             </div>
-            <CaStrip/>
         </section>
 
         <OctopusScene live=live/>
@@ -205,10 +200,7 @@ fn LivePage() -> impl IntoView {
                 <tbody>
                     <For each=move || live.crawlers.get() key=|c| c.id.clone() let:c>
                         <tr>
-                            <td class="name">
-                                {c.name.clone()}
-                                {c.owner.clone().map(|o| view! { <span class="owned" title=o.clone()>"◆ "{short_mid(&o)}</span> })}
-                            </td>
+                            <td class="name">{c.name.clone()}</td>
                             <td class=status_class(&c)>{c.status.letter().to_string()}</td>
                             <td class="dim">{host_of(&c.url)}</td>
                             <td class="r num">{c.pages_read.to_string()}</td>
@@ -651,246 +643,6 @@ fn pct(cov: u32, tgt: u32) -> f64 {
 }
 
 #[component]
-fn TreasuryPage() -> impl IntoView {
-    let live = use_context::<Live>().expect("live");
-    let loaded = move || live.treasury.get().is_some();
-    let addr = move || live.treasury.get().map(|t| t.address).unwrap_or_default();
-    let balance = move || live.treasury.get().map(|t| t.balance_sol).unwrap_or(0.0);
-    let txs = move || live.treasury.get().map(|t| t.txs).unwrap_or_default();
-    let inflow = move || txs().iter().filter(|t| t.delta_sol > 0.0).map(|t| t.delta_sol).sum::<f64>();
-    let count = move || txs().len();
-
-    view! {
-        <section class="pane pad">
-            <div class="pane__bar">
-                "~/octopuscrawl ❯ treasury --wallet"
-                <span class="dim">" · on-chain, read-only · the engine never signs or sends"</span>
-            </div>
-            <CaStrip facts=true/>
-            <div class="tre__stats">
-                <div class="tre__stat">
-                    <span class="dim">"treasury balance"</span>
-                    <b class="num">{move || if loaded() { format!("{:.4} SOL", balance()) } else { "…".into() }}</b>
-                </div>
-                <div class="tre__stat">
-                    <span class="dim">{move || format!("inflow (last {})", count())}</span>
-                    <b class="num">{move || format!("+{:.4} SOL", inflow())}</b>
-                </div>
-                <div class="tre__stat">
-                    <span class="dim">"wallet"</span>
-                    <a class="num tre__addr" href=move || format!("https://solscan.io/account/{}", addr())
-                        target="_blank" rel="noreferrer">{move || short_mid(&addr())}" ↗"</a>
-                </div>
-            </div>
-            <div class="tre__flow">
-                <div class="tre__flowhd dim">"planned allocation · starts once creator fees are routed to this wallet"</div>
-                <div class="flow__row flow__split">
-                    <span class="flow__k">"→ 60% compute (crawl + training)"</span>
-                    <span class="flow__v dim">"planned"</span>
-                </div>
-                <div class="flow__row flow__split">
-                    <span class="flow__k">"→ 40% crawler owners"</span>
-                    <span class="flow__v dim">"planned · split every 12h"</span>
-                </div>
-            </div>
-            <p class="dim tre__note">
-                "The balance, the token facts and the ledger below are read live from Solana — nothing here is fabricated. The 60/40 split is the plan once $OCTO's creator fees are routed to this wallet: 60% funds the crawl and training compute, 40% is split among hatchling owners. octopuscrawl only reads the chain; it never signs or moves funds."
-            </p>
-            <div class="pane__bar tre__bar">"on-chain activity"<span class="dim">" — live from Solana"</span></div>
-            <div class="tre__ledger">
-                <Show
-                    when=move || !txs().is_empty()
-                    fallback=move || view! {
-                        <div class="dim tre__empty">
-                            {move || if loaded() { "no transactions on this wallet yet" } else { "reading the chain…" }}
-                        </div>
-                    }
-                >
-                    <For each=txs key=|t| t.sig.clone() let:t>
-                        {
-                            let pos = t.delta_sol >= 0.0;
-                            let sig = t.sig.clone();
-                            let href = format!("https://solscan.io/tx/{sig}");
-                            view! {
-                                <div class="led__row">
-                                    <span class=if pos { "led__kind pos" } else { "led__kind neg" }>
-                                        {if pos { "in" } else { "out" }}
-                                    </span>
-                                    <a class="led__memo dim" href=href target="_blank" rel="noreferrer">
-                                        {short_mid(&sig)}" ↗"
-                                    </a>
-                                    <span class=if pos { "num led__sol pos" } else { "num led__sol neg" }>
-                                        {format!("{:+.4}", t.delta_sol)}
-                                    </span>
-                                </div>
-                            }
-                        }
-                    </For>
-                </Show>
-            </div>
-        </section>
-    }
-}
-
-/// Shorten a long base58 string (address / signature) as `abcd…wxyz`.
-fn short_mid(s: &str) -> String {
-    let n = s.chars().count();
-    if n <= 12 {
-        return s.to_string();
-    }
-    let head: String = s.chars().take(4).collect();
-    let tail: String = s.chars().skip(n - 4).collect();
-    format!("{head}…{tail}")
-}
-#[component]
-fn JoinPage() -> impl IntoView {
-    let live = use_context::<Live>().expect("live");
-    let balance = move || live.treasury.get().map(|t| t.balance_sol).unwrap_or(0.0);
-    let addr = move || live.treasury.get().map(|t| t.address).unwrap_or_default();
-    let fleet = move || live.stats.get().map(|s| s.crawlers_total).unwrap_or(0).max(1);
-    let pool = move || balance() * 0.40;
-    let per = move || pool() / fleet() as f64;
-
-    // spawn: paste the sending wallet → the server reads the transfer on-chain
-    let wallet_in = RwSignal::new(String::new());
-    let busy = RwSignal::new(false);
-    let result = RwSignal::new(None::<octopuscrawl_core::SpawnResult>);
-    let addr_copied = RwSignal::new(0u8);
-    let on_spawn = move |ev: leptos::ev::SubmitEvent| {
-        ev.prevent_default();
-        let w = wallet_in.get().trim().to_string();
-        if w.is_empty() || busy.get() {
-            return;
-        }
-        busy.set(true);
-        result.set(None);
-        spawn_local(async move {
-            let url = format!("{}/v1/spawn", http_base());
-            let body = serde_json::json!({ "wallet": w }).to_string();
-            let r = match gloo_net::http::Request::post(&url)
-                .header("content-type", "application/json")
-                .body(body)
-            {
-                Ok(req) => match req.send().await {
-                    Ok(resp) => resp.json::<octopuscrawl_core::SpawnResult>().await.ok(),
-                    Err(_) => None,
-                },
-                Err(_) => None,
-            };
-            let r = r.unwrap_or(octopuscrawl_core::SpawnResult {
-                message: "could not reach the server — try again".into(),
-                ..Default::default()
-            });
-            let spawned = r.ok;
-            result.set(Some(r));
-            busy.set(false);
-            if spawned {
-                crate::ws::refresh_sponsors(live).await;
-            }
-        });
-    };
-
-    view! {
-        <section class="pane pad join">
-            <div class="pane__bar">
-                "~/octopuscrawl ❯ join --crawl"
-                <span class="dim">" · hold $OCTO · own a hatchling · earn from the reef"</span>
-            </div>
-
-            <h2 class="join__h">"Own a hatchling. Put more tentacles on the web."</h2>
-            <p class="join__lead">
-                "Send "<b class="num">"150,000 $OCTO"</b>" to the treasury to spawn a hatchling that crawls the security web "
-                <i>"in your name"</i>". More hatchlings read more pages, so the dataset grows faster and the queen gets sharper sooner — the work is shared, not carried by one crawler."
-            </p>
-            <CaStrip facts=true/>
-
-            <div class="join__steps">
-                <div class="join__step">
-                    <div class="join__num">"1"</div>
-                    <div class="join__k">"hold"</div>
-                    <p class="dim">"Hold $OCTO — the token is live on Solana (CA above)."</p>
-                </div>
-                <div class="join__step">
-                    <div class="join__num">"2"</div>
-                    <div class="join__k">"spawn"</div>
-                    <p class="dim">"Send 150,000 $OCTO to the treasury from your own wallet, then verify below — your hatchling joins the swarm under your wallet."</p>
-                </div>
-                <div class="join__step">
-                    <div class="join__num">"3"</div>
-                    <div class="join__k">"earn"</div>
-                    <p class="dim">"Planned: 40% of creator fees split among hatchling owners every 12h, 60% to the crawl + training compute."</p>
-                </div>
-            </div>
-
-            <div class="join__pool">
-                <div class="join__poolhd dim">"planned owners' pool · illustrated with the live treasury"</div>
-                <div class="join__poolrow">
-                    <span class="dim">"treasury balance (on-chain)"</span>
-                    <b class="num">{move || format!("{:.4} SOL", balance())}</b>
-                </div>
-                <div class="join__poolrow">
-                    <span class="dim">"→ 40% owners' pool"</span>
-                    <b class="num">{move || format!("{:.4} SOL", pool())}</b>
-                </div>
-                <div class="join__poolrow join__poolrow--hi">
-                    <span class="dim">{move || format!("→ per hatchling (of {} live)", fleet())}</span>
-                    <b class="num">{move || format!("{:.5} SOL", per())}</b>
-                </div>
-                <p class="dim join__fine">
-                    "Illustration only, from the current SOL balance. The split starts once creator fees are routed to this wallet. Nothing here is a promise of returns."
-                </p>
-            </div>
-
-            <div class="join__spawn">
-                <div class="pane__bar">"spawn a hatchling"<span class="dim">" · verified on-chain, read-only"</span></div>
-                <ol class="spawn__steps">
-                    <li>
-                        "Send "<b class="num">"150,000 $OCTO"</b>" from "<b>"your own wallet"</b>
-                        " (not an exchange — the sender is the owner) to the treasury:"
-                        <div class="join__addr">
-                            <code>{move || addr()}</code>
-                            <button
-                                class="ca__copy"
-                                type="button"
-                                class:ca__copy--ok=move || addr_copied.get() == 1
-                                on:click=move |_| copy_into(addr_copied, addr())
-                            >
-                                {move || copy_label(addr_copied.get())}
-                            </button>
-                        </div>
-                    </li>
-                    <li>"Paste the wallet you sent from and verify. The server finds the transfer on Solana — nothing to sign, nothing to connect."</li>
-                </ol>
-                <form class="spawn__form" on:submit=on_spawn>
-                    <input
-                        class="spawn__in"
-                        type="text"
-                        placeholder="the wallet you sent from"
-                        spellcheck="false"
-                        autocomplete="off"
-                        aria-label="your Solana wallet address"
-                        prop:value=move || wallet_in.get()
-                        on:input=move |ev| wallet_in.set(event_target_value(&ev))
-                    />
-                    <button class="qask__btn join__cta" type="submit" prop:disabled=move || busy.get()>
-                        {move || if busy.get() { "reading the chain…" } else { "verify & spawn" }}
-                    </button>
-                </form>
-                {move || result.get().map(|r| view! {
-                    <div class=if r.ok { "spawn__msg spawn__msg--ok" } else { "spawn__msg" }>{r.message.clone()}</div>
-                })}
-            </div>
-
-            <OwnersBoard/>
-
-            <p class="dim join__guard">
-                "Every hatchling — house or sponsored — gets an equal share of the new pages the swarm reads, and every three sponsored hatchlings add one more reading tab to the crawl (up to five tabs for now), so sponsors genuinely grow how much gets read. Transfers count from the moment sponsorship opened; up to 10 hatchlings per wallet for now (extra $OCTO stays as credit). Owner payouts from creator fees are planned and not wired yet. Hatchlings read the security allowlist only — robots.txt obeyed, never past a bot check. octopuscrawl only READS the chain and the web; it never signs or moves funds."
-            </p>
-        </section>
-    }
-}
-
-#[component]
 fn ManPage() -> impl IntoView {
     view! {
         <section class="pane pad man">
@@ -931,11 +683,10 @@ fn ManPage() -> impl IntoView {
                     <p><b>"/v1/graph"</b>"           the knowledge graph — pages (nodes) and links (edges)"</p>
                     <p><b>"/v1/vocab"</b>"           the queen's trained tokenizer — size and learned subwords"</p>
                     <p><b>"/v1/queen/ask"</b>"       ask the queen — answers only from what she has read"</p>
-                    <p><b>"/v1/treasury"</b>"        the treasury wallet, read live from Solana"</p>
                 </dd>
 
                 <dt>"SEE ALSO"</dt>
-                <dd>"crawlers(1), map(1), queen(1), treasury(1), join(1)"</dd>
+                <dd>"crawlers(1), map(1), queen(1)"</dd>
             </dl>
             <p class="man__foot dim">"octopuscrawl 0.1 · octopuscrawl.net · the engine only reads."</p>
         </section>
@@ -1045,129 +796,5 @@ fn chapter_of_host(host: &str) -> &'static str {
         "standards"
     } else {
         "writeups"
-    }
-}
-
-/// The token's contract address — the one place the site publishes it.
-pub const TOKEN_CA: &str = "EdXrLt2PMZF4wwAsytQRAryG3eNy3dtLo6rBGKMMpump";
-
-/// Copy text to the clipboard; true only once the browser confirms it.
-async fn copy_text(text: String) -> bool {
-    use wasm_bindgen::JsCast;
-    let Some(w) = web_sys::window() else { return false };
-    let nav = js_sys::Reflect::get(&w, &"navigator".into()).ok();
-    let clip = nav.and_then(|n| js_sys::Reflect::get(&n, &"clipboard".into()).ok());
-    let Some(clip) = clip.filter(|c| !c.is_undefined()) else { return false };
-    let Some(f) = js_sys::Reflect::get(&clip, &"writeText".into())
-        .ok()
-        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
-    else {
-        return false;
-    };
-    let Ok(p) = f.call1(&clip, &wasm_bindgen::JsValue::from_str(&text)) else { return false };
-    let Ok(p) = p.dyn_into::<js_sys::Promise>() else { return false };
-    wasm_bindgen_futures::JsFuture::from(p).await.is_ok()
-}
-
-/// Copy-button state: 0 idle, 1 copied, 2 the browser refused (select instead).
-fn copy_into(state: RwSignal<u8>, text: String) {
-    spawn_local(async move {
-        state.set(if copy_text(text).await { 1 } else { 2 });
-        gloo_timers::future::TimeoutFuture::new(1800).await;
-        state.set(0);
-    });
-}
-
-fn copy_label(state: u8) -> &'static str {
-    match state {
-        1 => "copied ✓",
-        2 => "select & copy",
-        _ => "copy",
-    }
-}
-
-/// `$OCTO` contract address with copy + explorer links, and (optionally) the
-/// token facts read live from its mint account.
-#[component]
-fn CaStrip(#[prop(optional)] facts: bool) -> impl IntoView {
-    let live = use_context::<Live>().expect("live");
-    let copied = RwSignal::new(0u8);
-    let on_copy = move |_| copy_into(copied, TOKEN_CA.to_string());
-    let tok = move || live.treasury.get().map(|t| t.token).filter(|t| t.ok);
-    view! {
-        <div class="ca">
-            <div class="ca__row">
-                <span class="ca__tag">"$OCTO"</span>
-                <span class="ca__lbl dim">"CA"</span>
-                <code class="ca__addr" title="contract address">{TOKEN_CA}</code>
-                <button class="ca__copy" class:ca__copy--ok=move || copied.get() == 1 on:click=on_copy>
-                    {move || copy_label(copied.get())}
-                </button>
-                <span class="ca__links">
-                    <a href=format!("https://pump.fun/coin/{TOKEN_CA}") target="_blank" rel="noreferrer">"pump.fun ↗"</a>
-                    <a href=format!("https://dexscreener.com/solana/{TOKEN_CA}") target="_blank" rel="noreferrer">"dexscreener ↗"</a>
-                    <a href=format!("https://solscan.io/token/{TOKEN_CA}") target="_blank" rel="noreferrer">"solscan ↗"</a>
-                </span>
-            </div>
-            {move || (facts).then(|| view! {
-                <div class="ca__facts">
-                    {move || match tok() {
-                        Some(t) => view! {
-                            <span>"supply "<b class="num">{fmt_num(t.supply.round() as u64)}</b></span>
-                            <span>"mint authority "<b class=if t.mint_authority.is_none() { "ok" } else { "warn" }>
-                                {if t.mint_authority.is_none() { "revoked" } else { "active" }}</b></span>
-                            <span>"freeze authority "<b class=if t.freeze_authority.is_none() { "ok" } else { "warn" }>
-                                {if t.freeze_authority.is_none() { "revoked" } else { "active" }}</b></span>
-                            <span>"treasury holds "<b class="num">{fmt_num(t.treasury_holding.round() as u64)}</b>" $OCTO"</span>
-                            <span class="dim">"· read live from Solana"</span>
-                        }.into_any(),
-                        None => view! { <span class="dim">"reading the mint from Solana…"</span> }.into_any(),
-                    }}
-                </div>
-            })}
-        </div>
-    }
-}
-
-/// Sponsored hatchlings and what each has added to the dataset.
-#[component]
-fn OwnersBoard() -> impl IntoView {
-    let live = use_context::<Live>().expect("live");
-    let rows = move || {
-        let mut v = live.sponsors.get();
-        v.sort_by(|a, b| b.pages.cmp(&a.pages));
-        v
-    };
-    view! {
-        <section class="owners">
-            <div class="pane__bar">"hatchling owners"<span class="dim">" — sponsored hatchlings and the new pages they have added"</span></div>
-            <Show
-                when=move || !live.sponsors.get().is_empty()
-                fallback=|| view! { <p class="dim owners__empty">"No sponsored hatchlings yet — the first one shows up here the moment it is verified."</p> }
-            >
-                <div class="tbl__scroll">
-                    <table class="tbl">
-                        <thead>
-                            <tr><th>"HATCHLING"</th><th>"OWNER"</th><th class="r">"NEW PAGES"</th><th class="r">"TOKENS"</th><th>"SINCE"</th></tr>
-                        </thead>
-                        <tbody>
-                            <For each=rows key=|r| format!("{}:{}", r.crawler_id, r.pages) let:r>
-                                <tr>
-                                    <td class="name">{r.name.clone()}</td>
-                                    <td>
-                                        <a class="owners__w" href=format!("https://solscan.io/account/{}", r.wallet) target="_blank" rel="noreferrer">
-                                            {short_mid(&r.wallet)}" ↗"
-                                        </a>
-                                    </td>
-                                    <td class="r num">{fmt_num(r.pages)}</td>
-                                    <td class="r num">{fmt_num(r.tokens)}</td>
-                                    <td class="dim num">{r.since.format("%Y-%m-%d").to_string()}</td>
-                                </tr>
-                            </For>
-                        </tbody>
-                    </table>
-                </div>
-            </Show>
-        </section>
     }
 }

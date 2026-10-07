@@ -94,9 +94,8 @@ const SEEDS: &[&str] = &[
 ];
 
 const MAX_CAPTURES: usize = 140;
-/// Headless tabs reading in parallel (sponsored hatchlings add more).
-const READERS: usize = 2;
-const MAX_READERS: usize = 5;
+/// Headless tabs reading in parallel.
+const READERS: usize = 3;
 
 struct Capture {
     host: String,
@@ -184,27 +183,11 @@ pub async fn run(state: Arc<AppState>) {
     origins.dedup();
     discover::spawn(frontier.clone(), origins);
 
-    // readers: headless tabs pull from the frontier in parallel (the frontier
-    // rotates hosts so no site is hit more than once every few seconds).
-    // Sponsored hatchlings add real capacity: one more tab for every three.
+    // readers: headless tabs pull from the frontier in parallel; the frontier
+    // rotates hosts so no site is hit more than once every few seconds
     let (tx, mut rx) = mpsc::channel::<(Item, anyhow::Result<PageRead>)>(8);
-    {
-        let (engine, frontier, state) = (engine.clone(), frontier.clone(), state.clone());
-        tokio::spawn(async move {
-            let mut running = 0usize;
-            loop {
-                let sponsored = state.sponsors.read().await.sponsors.len();
-                let want = (READERS + sponsored / 3).min(MAX_READERS);
-                while running < want {
-                    spawn_reader(running, engine.clone(), frontier.clone(), state.clone(), tx.clone());
-                    running += 1;
-                    if running > READERS {
-                        println!("[crawl] sponsors added a reader — {running} tabs reading now");
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(20)).await;
-            }
-        });
+    for w in 0..READERS {
+        spawn_reader(w, engine.clone(), frontier.clone(), state.clone(), tx.clone());
     }
 
     let seq = AtomicU64::new(1);
@@ -229,7 +212,6 @@ pub async fn run(state: Arc<AppState>) {
                 }
                 if t % 43 == 0 {
                     frontier.lock().await.save();
-                    state.sponsors.read().await.save();
                 }
             }
             msg = rx.recv() => {
@@ -272,11 +254,6 @@ pub async fn run(state: Arc<AppState>) {
                     remember(&state, &cap);
                     update_vocab(&state, &ingest).await;
                     apply(&state, idx, &cap, s, true, item.parent.as_deref()).await;
-                    // a sponsored hatchling's new page counts toward its owner
-                    let cid = state.snapshot.read().await.crawlers.get(idx).map(|c| c.id.clone());
-                    if let Some(cid) = cid.filter(|c| c.starts_with("own-")) {
-                        state.sponsors.write().await.credit_read(&cid, cap.tokens);
-                    }
                     println!("[crawl] read {} ({} tok, +{found} links)", cap.url, cap.tokens);
                 } else {
                     // shown live, but it adds nothing new to the dataset

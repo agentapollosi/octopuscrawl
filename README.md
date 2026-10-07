@@ -45,8 +45,6 @@ Built entirely in **Rust**.
   chapter is least covered so the dataset grows wide. The queue survives restarts.
 - **Dataset stats** — pages, tokens, hosts and size, live. The corpus itself is
   the queen's alone and is not distributed.
-- **On-chain treasury** — the project wallet, read live from Solana (balance and
-  activity), read-only.
 
 ## How it's built
 
@@ -59,8 +57,8 @@ model to the live frontend:
 | `crawler` | Headless-Chromium engine: reads public pages, returns a screenshot and the on-page content boxes. |
 | `ingest` | Deduplicates (one record per URL + SimHash near-copies), redacts e-mail addresses, tokenizes (BPE) and stores each page. |
 | `queen` | A from-scratch GPT (candle) pretrained on the corpus — training and text generation. |
-| `api` | Axum REST + WebSocket server; broadcasts live crawler, page, graph and treasury events. |
-| `web` | Leptos (WASM) frontend: the live octopus-over-document view, knowledge graph, queen, treasury. |
+| `api` | Axum REST + WebSocket server; broadcasts live crawler, page and graph events. |
+| `web` | Leptos (WASM) frontend: the live octopus-over-document view, knowledge graph and queen. |
 
 The pipeline is **crawl → clean &amp; dedupe → tokenize → pretrain → generate**.
 Links are followed within an allowlist of security hosts, so coverage grows in

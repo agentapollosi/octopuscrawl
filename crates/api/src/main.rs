@@ -9,8 +9,6 @@ mod corpus;
 mod demo;
 mod frames;
 mod history;
-mod sponsor;
-mod treasury;
 #[cfg(feature = "real")]
 mod crawl;
 #[cfg(feature = "real")]
@@ -54,9 +52,7 @@ struct AppState {
     corpus: Corpus,
     graph: RwLock<GraphSnapshot>,
     vocab: RwLock<VocabStats>,
-    treasury: RwLock<TreasurySnapshot>,
     history: RwLock<Vec<HistPoint>>,
-    sponsors: RwLock<sponsor::Book>,
 }
 
 /// On-disk dataset the crawl produces (relative to the server's working dir).
@@ -90,10 +86,7 @@ fn spawn_graph_saver(state: Arc<AppState>) {
 
 #[tokio::main]
 async fn main() {
-    let mut crawlers = demo::seed_crawlers(24);
-    // sponsored hatchlings come back after a restart, with their tallies
-    let book = sponsor::Book::load();
-    crawlers.extend(book.sponsors.iter().map(sponsor::crawler_for));
+    let crawlers = demo::seed_crawlers(24);
     let stats = demo::seed_stats(&crawlers);
     let (tx, _rx) = broadcast::channel::<LiveMsg>(1024);
     let state = Arc::new(AppState {
@@ -103,15 +96,12 @@ async fn main() {
         corpus: Corpus::default(),
         graph: RwLock::new(load_graph()),
         vocab: RwLock::new(VocabStats::default()),
-        treasury: RwLock::new(TreasurySnapshot::default()),
         history: RwLock::new(history::load()),
-        sponsors: RwLock::new(book),
     });
 
     clock::spawn();
     spawn_engine(state.clone());
     spawn_graph_saver(state.clone());
-    treasury::spawn_poller(state.clone());
     history::spawn_sampler(state.clone());
 
     let app = Router::new()
@@ -126,10 +116,7 @@ async fn main() {
         .route("/v1/vocab", get(get_vocab))
         .route("/v1/dataset.jsonl", get(get_dataset))
         .route("/v1/dataset/meta", get(get_dataset_meta))
-        .route("/v1/treasury", get(get_treasury))
         .route("/v1/history", get(get_history))
-        .route("/v1/sponsors", get(get_sponsors))
-        .route("/v1/spawn", axum::routing::post(post_spawn))
         .route("/v1/live", get(ws_upgrade))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -142,21 +129,6 @@ async fn main() {
 
 async fn get_stats(State(state): State<Arc<AppState>>) -> Json<Stats> {
     Json(state.snapshot.read().await.stats.clone())
-}
-
-async fn get_sponsors(State(state): State<Arc<AppState>>) -> Json<Vec<SponsorView>> {
-    Json(state.sponsors.read().await.views())
-}
-
-#[derive(Deserialize)]
-struct SpawnReq {
-    wallet: String,
-}
-
-/// Verify on-chain that `wallet` sent $OCTO to the treasury, and spawn its
-/// hatchlings. Read-only: the server never signs or moves anything.
-async fn post_spawn(State(state): State<Arc<AppState>>, Json(req): Json<SpawnReq>) -> Json<SpawnResult> {
-    Json(sponsor::claim(&state, &req.wallet).await)
 }
 
 #[derive(Deserialize)]
@@ -176,10 +148,6 @@ async fn get_graph(State(state): State<Arc<AppState>>) -> Json<GraphSnapshot> {
 
 async fn get_vocab(State(state): State<Arc<AppState>>) -> Json<VocabStats> {
     Json(state.vocab.read().await.clone())
-}
-
-async fn get_treasury(State(state): State<Arc<AppState>>) -> Json<TreasurySnapshot> {
-    Json(state.treasury.read().await.clone())
 }
 
 async fn get_dataset_meta(State(_state): State<Arc<AppState>>) -> Json<DatasetMeta> {
