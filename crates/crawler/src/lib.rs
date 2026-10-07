@@ -126,11 +126,44 @@ pub struct PageRead {
     pub links: Vec<LinkBox>,
     /// Cleaned visible text of the page (truncated) — the corpus the queen reads.
     pub text: String,
+    /// Every http(s) link on the page (fragment stripped) — for discovery, not
+    /// display. The on-screen `links` boxes are only what fits in the viewport.
+    pub links_all: Vec<String>,
 }
 
 // Pull out the real *content* the queen is reading — headings and body text in
 // the main article, in reading order — not the nav bar, footer or cookie banner.
 // Each box is tagged (head / text / link) and clamped to the 1280×800 viewport
+/// Hide (never accept) common cookie / consent overlays before the capture.
+const HIDE_OVERLAYS_JS: &str = r#"
+(() => {
+  const css = `
+    #onetrust-banner-sdk, #onetrust-consent-sdk, .onetrust-pc-dark-filter,
+    #CybotCookiebotDialog, #cookiebanner, #cookie-banner, #cookieConsent,
+    .cc-window, .cc-banner, .cookie-banner, .cookie-consent, .cookie-notice,
+    .truste_box_overlay, #truste-consent-track, #usercentrics-root,
+    [id*="cookie" i][class*="banner" i], [class*="cookie" i][class*="banner" i],
+    [id*="consent" i][class*="banner" i], [class*="consent" i][class*="banner" i],
+    [aria-label*="cookie" i][role="dialog"], [aria-label*="consent" i][role="dialog"]
+    { display: none !important; visibility: hidden !important; }
+  `;
+  const st = document.createElement('style');
+  st.setAttribute('data-octopuscrawl', 'hide-overlays');
+  st.textContent = css;
+  document.documentElement.appendChild(st);
+  // fixed bottom/top bars that mention cookies but carry no known id/class
+  for (const el of document.querySelectorAll('body *')) {
+    const cs = getComputedStyle(el);
+    if (cs.position !== 'fixed' && cs.position !== 'sticky') continue;
+    const t = (el.innerText || '').slice(0, 600).toLowerCase();
+    if (t.includes('cookie') && (t.includes('accept') || t.includes('consent') || t.includes('privacy'))) {
+      el.style.setProperty('display', 'none', 'important');
+    }
+  }
+  return true;
+})()
+"#;
+
 // so it lines up exactly with the screenshot the tentacles ink.
 const EXTRACT_JS: &str = r#"
 (() => {
@@ -198,6 +231,9 @@ pub async fn read_page(browser: &Browser, url: &str) -> Result<PageRead> {
     // extracted boxes line up with the screenshot.
     tokio::time::sleep(Duration::from_millis(1800)).await;
     let _ = page.evaluate("window.scrollTo(0,0)").await;
+    // Cookie/consent overlays cover the content in a capture. Hide them with CSS
+    // only — nothing is clicked, so no consent is ever given on anyone's behalf.
+    let _ = page.evaluate(HIDE_OVERLAYS_JS).await;
 
     let title = page.get_title().await?.unwrap_or_default();
 
@@ -209,6 +245,13 @@ pub async fn read_page(browser: &Browser, url: &str) -> Result<PageRead> {
 
     let text: String = page
         .evaluate(TEXT_JS)
+        .await
+        .ok()
+        .and_then(|v| v.into_value().ok())
+        .unwrap_or_default();
+
+    let links_all: Vec<String> = page
+        .evaluate(LINKS_JS)
         .await
         .ok()
         .and_then(|v| v.into_value().ok())
@@ -231,64 +274,200 @@ pub async fn read_page(browser: &Browser, url: &str) -> Result<PageRead> {
         jpeg,
         links,
         text,
+        links_all,
     })
 }
+
+/// Every link on the page, absolute, fragment stripped, de-duplicated.
+const LINKS_JS: &str = r#"
+(() => {
+  const out = new Set();
+  for (const a of document.querySelectorAll('a[href]')) {
+    try {
+      const u = new URL(a.getAttribute('href'), location.href);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;
+      u.hash = '';
+      out.add(u.href);
+    } catch (e) {}
+    if (out.size >= 1500) break;
+  }
+  return Array.from(out);
+})()
+"#;
 
 /// Cleaned, truncated visible text of the page.
 const TEXT_JS: &str = r#"
 (() => {
-  const t = (document.body ? document.body.innerText : "") || "";
-  return t.replace(/\s+/g, " ").trim().slice(0, 6000);
+  // hide site chrome for a moment so innerText is the page's own content — the
+  // same menu and footer repeated on every page would drown what is unique
+  const st = document.createElement('style');
+  st.textContent = 'nav,header,footer,aside,form,[role="navigation"],[role="banner"],' +
+    '[role="contentinfo"],[role="search"],[aria-label*="breadcrumb" i],.breadcrumb,' +
+    '[class*="cookie" i],[id*="cookie" i],[class*="consent" i]{display:none!important}';
+  document.documentElement.appendChild(st);
+  const clean = (el) => ((el && el.innerText) || "").replace(/\s+/g, " ").trim();
+  const main = document.querySelector('main, article, [role="main"], #main-content, #content, #main');
+  let t = clean(main);
+  if (t.length < 200) t = clean(document.body);
+  st.remove();
+  return t.slice(0, 8000);
 })()
 "#;
 
-/// Minimal robots.txt check for `User-agent: *`. Fails open only on fetch error,
-/// never on an explicit Disallow.
-pub async fn robots_allows(target: &str) -> bool {
-    let parsed = match url::Url::parse(target) {
-        Ok(u) => u,
-        Err(_) => return false,
+/// robots.txt rules for `User-agent: *`, plus the sitemaps the site publishes.
+#[derive(Debug, Default, Clone)]
+pub struct RobotsRules {
+    /// (allow?, pattern) — the longest matching pattern wins, Allow on a tie.
+    rules: Vec<(bool, String)>,
+    pub sitemaps: Vec<String>,
+}
+
+impl RobotsRules {
+    pub fn parse(body: &str) -> Self {
+        let mut out = RobotsRules::default();
+        let mut star = false;
+        let mut reading_agents = false;
+        for raw in body.lines() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            let Some((k, v)) = line.split_once(':') else { continue };
+            let (k, v) = (k.trim().to_ascii_lowercase(), v.trim().to_string());
+            match k.as_str() {
+                "user-agent" => {
+                    if !reading_agents {
+                        star = false;
+                        reading_agents = true;
+                    }
+                    if v == "*" {
+                        star = true;
+                    }
+                }
+                "allow" | "disallow" => {
+                    reading_agents = false;
+                    if star && !v.is_empty() {
+                        out.rules.push((k == "allow", v));
+                    }
+                }
+                "sitemap" => {
+                    // "Sitemap: https://…" — split_once cut at the scheme's colon
+                    let full = line[line.find(':').map(|i| i + 1).unwrap_or(0)..].trim().to_string();
+                    if full.starts_with("http") {
+                        out.sitemaps.push(full);
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Is `path` (path + query) allowed for `User-agent: *`?
+    pub fn allows(&self, path: &str) -> bool {
+        let mut best: Option<(usize, bool)> = None;
+        for (allow, pat) in &self.rules {
+            if pattern_matches(pat, path) {
+                let len = pat.len();
+                best = match best {
+                    Some((l, a)) if l > len || (l == len && a) => Some((l, a)),
+                    _ => Some((len, *allow)),
+                };
+            }
+        }
+        best.map_or(true, |(_, allow)| allow)
+    }
+}
+
+/// robots.txt pattern match: `*` is any run of characters, a trailing `$`
+/// anchors the end; otherwise it is a prefix match.
+fn pattern_matches(pattern: &str, path: &str) -> bool {
+    let (pat, anchored) = match pattern.strip_suffix('$') {
+        Some(p) => (p, true),
+        None => (pattern, false),
     };
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+    let parts: Vec<&str> = pat.split('*').collect();
+    if !path.starts_with(parts[0]) {
         return false;
     }
-    let robots_url = match parsed.join("/robots.txt") {
-        Ok(u) => u,
-        Err(_) => return true,
-    };
-    let path = parsed.path();
+    let mut pos = parts[0].len();
+    for part in parts.iter().skip(1) {
+        if part.is_empty() {
+            continue;
+        }
+        match path[pos..].find(part) {
+            Some(off) => pos += off + part.len(),
+            None => return false,
+        }
+    }
+    if anchored {
+        let last = parts.last().copied().unwrap_or("");
+        return if parts.len() == 1 { path == pat } else { path.ends_with(last) };
+    }
+    true
+}
 
+type RobotsCache = tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<RobotsRules>)>>;
+
+fn robots_cache() -> &'static RobotsCache {
+    static CACHE: std::sync::OnceLock<RobotsCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The robots rules for a URL's origin — fetched once and kept for 6 hours, so a
+/// site is asked for robots.txt once, not once per page.
+pub async fn robots_for(target: &str) -> Option<std::sync::Arc<RobotsRules>> {
+    let parsed = url::Url::parse(target).ok()?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return None;
+    }
+    let origin = parsed.origin().ascii_serialization();
+    {
+        let cache = robots_cache().lock().await;
+        if let Some((at, rules)) = cache.get(&origin) {
+            if at.elapsed() < Duration::from_secs(6 * 3600) {
+                return Some(rules.clone());
+            }
+        }
+    }
     let body = match reqwest::Client::new()
-        .get(robots_url.as_str())
+        .get(format!("{origin}/robots.txt"))
         .timeout(Duration::from_secs(8))
         .send()
         .await
     {
         Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
-        _ => return true, // no robots.txt → allowed
+        _ => String::new(), // no robots.txt → everything allowed
     };
+    let rules = std::sync::Arc::new(RobotsRules::parse(&body));
+    robots_cache().lock().await.insert(origin, (std::time::Instant::now(), rules.clone()));
+    Some(rules)
+}
 
-    // walk the `User-agent: *` group and collect its Disallow prefixes
-    let mut in_star = false;
-    let mut disallows: Vec<String> = Vec::new();
-    for raw in body.lines() {
-        let line = raw.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        let (k, v) = match line.split_once(':') {
-            Some((k, v)) => (k.trim().to_ascii_lowercase(), v.trim().to_string()),
-            None => continue,
-        };
-        match k.as_str() {
-            "user-agent" => in_star = v == "*",
-            "disallow" if in_star => {
-                if !v.is_empty() {
-                    disallows.push(v);
-                }
-            }
-            _ => {}
-        }
+/// Is this URL allowed by its site's robots.txt (`User-agent: *`)?
+pub async fn robots_allows(target: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(target) else { return false };
+    let Some(rules) = robots_for(target).await else { return false };
+    let mut path = parsed.path().to_string();
+    if let Some(q) = parsed.query() {
+        path.push('?');
+        path.push_str(q);
     }
-    !disallows.iter().any(|d| path.starts_with(d.as_str()))
+    rules.allows(&path)
+}
+
+#[cfg(test)]
+mod robots_tests {
+    use super::RobotsRules;
+
+    #[test]
+    fn longest_match_and_wildcards() {
+        let r = RobotsRules::parse(
+            "User-agent: Googlebot\nDisallow: /\n\nUser-agent: *\nDisallow: /private/\nAllow: /private/ok\nDisallow: /*.pdf$\nDisallow: /*?\nSitemap: https://x.org/sitemap.xml\n",
+        );
+        assert!(r.allows("/docs/a.html"));
+        assert!(!r.allows("/private/x"));
+        assert!(r.allows("/private/ok/1"));
+        assert!(!r.allows("/files/a.pdf"));
+        assert!(r.allows("/files/a.pdf.html"));
+        assert!(!r.allows("/search?q=1"));
+        assert_eq!(r.sitemaps, vec!["https://x.org/sitemap.xml".to_string()]);
+    }
 }

@@ -119,7 +119,7 @@ pub fn StatsDashboard(live: Live) -> impl IntoView {
 
             <div class="dash__grid">
                 <div class="pane dash__chart">
-                    <div class="pane__bar">"dataset growth — tokens read over time"</div>
+                    <div class="pane__bar">"dataset growth — tokens over the last 24h"<span class="dim">" · hover for any minute"</span></div>
                     <GrowthChart live=live/>
                 </div>
                 <div class="pane dash__chaps">
@@ -160,16 +160,41 @@ pub fn StatsDashboard(live: Live) -> impl IntoView {
 #[component]
 fn GrowthChart(live: Live) -> impl IntoView {
     let cref = NodeRef::<Canvas>::new();
+    let hover = RwSignal::new(-1.0f64);
     Effect::new(move |_| {
         if let Some(c) = cref.get() {
             let c: HtmlCanvasElement = c.unchecked_into();
-            start_growth(c, live);
+            start_growth(c, live, hover);
         }
     });
-    view! { <div class="growth"><canvas node_ref=cref class="growth__cv"></canvas></div> }
+    view! {
+        <div class="growth">
+            <canvas
+                node_ref=cref
+                class="growth__cv"
+                on:mousemove=move |e| hover.set(e.offset_x() as f64)
+                on:mouseleave=move |_| hover.set(-1.0)
+            ></canvas>
+        </div>
+    }
 }
 
-fn start_growth(canvas: HtmlCanvasElement, live: Live) {
+fn hhmm(t: i64) -> String {
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(t as f64 * 1000.0));
+    format!("{:02}:{:02}", d.get_utc_hours(), d.get_utc_minutes())
+}
+
+fn short_num(v: f64) -> String {
+    if v >= 1_000_000.0 {
+        format!("{:.2}M", v / 1_000_000.0)
+    } else if v >= 1000.0 {
+        format!("{:.0}k", v / 1000.0)
+    } else {
+        format!("{v:.0}")
+    }
+}
+
+fn start_growth(canvas: HtmlCanvasElement, live: Live, hover: RwSignal<f64>) {
     let ctx: CanvasRenderingContext2d = match canvas.get_context("2d").ok().flatten() {
         Some(o) => match o.dyn_into() {
             Ok(c) => c,
@@ -194,71 +219,142 @@ fn start_growth(canvas: HtmlCanvasElement, live: Live) {
         let _ = ctx.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0);
         ctx.clear_rect(0.0, 0.0, cw, ch);
 
-        let vals: Vec<f64> = live.history.with_untracked(|h| h.iter().map(|s| s.tokens as f64).collect());
-        let pad = 10.0;
-        // grid
+        // server history (24h, one point a minute) + the live value as the tip
+        let mut pts: Vec<(f64, f64, f64)> = live
+            .growth
+            .with_untracked(|g| g.iter().map(|p| (p.t as f64, p.tokens as f64, p.pages as f64)).collect());
+        // the live counters as the newest point, stamped with the server's clock so
+        // it lines up with the server-sampled history
+        if let Some(s) = live.stats.get_untracked() {
+            let now = s.updated_at.timestamp() as f64;
+            pts.push((now, s.dataset_tokens as f64, s.pages_read as f64));
+        }
+
+        let (pl, pr, pt, pb) = (46.0, 14.0, 12.0, 24.0);
+        let (x0, x1, y0, y1) = (pl, cw - pr, pt, ch - pb);
+
+        ctx.set_font("10px 'IBM Plex Mono', monospace");
         set_stroke(&ctx, "#16203f");
         ctx.set_line_width(1.0);
         for k in 0..=3 {
-            let y = pad + (ch - 2.0 * pad) * k as f64 / 3.0;
+            let y = y0 + (y1 - y0) * k as f64 / 3.0;
             ctx.begin_path();
-            ctx.move_to(pad, y);
-            ctx.line_to(cw - pad, y);
+            ctx.move_to(x0, y);
+            ctx.line_to(x1, y);
             ctx.stroke();
         }
-        if vals.len() < 2 {
+        if pts.len() < 2 {
+            set_fill(&ctx, "#5f7199");
+            let _ = ctx.fill_text("collecting the first samples…", x0 + 8.0, (y0 + y1) * 0.5);
             return;
         }
-        let n = vals.len();
-        let mn = vals.iter().cloned().fold(f64::INFINITY, f64::min);
-        let mx = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let range = (mx - mn).max(1.0);
-        let xy = |i: usize, v: f64| -> (f64, f64) {
-            let x = pad + (cw - 2.0 * pad) * i as f64 / (n - 1) as f64;
-            let y = pad + (ch - 2.0 * pad) * (1.0 - (v - mn) / range);
-            (x, y)
+        let tmin = pts[0].0;
+        let tmax = pts[pts.len() - 1].0.max(tmin + 60.0);
+        let vmin = pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+        let vmax = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+        // pad the range so a flat stretch sits mid-chart, not on the floor
+        let span = (vmax - vmin).max(vmax * 0.02).max(1.0);
+        let lo = (vmin - span * 0.08).max(0.0);
+        let hi = vmax + span * 0.08;
+        let xy = |t: f64, v: f64| -> (f64, f64) {
+            (x0 + (x1 - x0) * (t - tmin) / (tmax - tmin), y1 - (y1 - y0) * (v - lo) / (hi - lo))
         };
 
-        // area fill
+        // axis labels: value range + time range (UTC)
+        set_fill(&ctx, "#5f7199");
+        ctx.set_text_align("right");
+        let _ = ctx.fill_text(&short_num(hi), x0 - 6.0, y0 + 4.0);
+        let _ = ctx.fill_text(&short_num(lo), x0 - 6.0, y1 + 3.0);
+        ctx.set_text_align("left");
+        let _ = ctx.fill_text(&format!("{} UTC", hhmm(tmin as i64)), x0, ch - 7.0);
+        ctx.set_text_align("right");
+        let _ = ctx.fill_text("now", x1, ch - 7.0);
+        ctx.set_text_align("left");
+
+        // area
         ctx.begin_path();
-        let (x0, _) = xy(0, vals[0]);
-        ctx.move_to(x0, ch - pad);
-        for (i, v) in vals.iter().enumerate() {
-            let (x, y) = xy(i, *v);
+        let (sx, _) = xy(pts[0].0, pts[0].1);
+        ctx.move_to(sx, y1);
+        for p in &pts {
+            let (x, y) = xy(p.0, p.1);
             ctx.line_to(x, y);
         }
-        let (xl, _) = xy(n - 1, vals[n - 1]);
-        ctx.line_to(xl, ch - pad);
+        let (ex, _) = xy(pts[pts.len() - 1].0, 0.0);
+        ctx.line_to(ex, y1);
         ctx.close_path();
         ctx.set_global_alpha(0.14);
         set_fill(&ctx, "#2ad4ff");
         ctx.fill();
         ctx.set_global_alpha(1.0);
 
-        // line
+        // line (stepped: tokens only change when a page lands)
         ctx.save();
         ctx.set_shadow_blur(8.0);
         ctx.set_shadow_color("#2ad4ff");
         set_stroke(&ctx, "#35e0ff");
         ctx.set_line_width(2.0);
         ctx.begin_path();
-        for (i, v) in vals.iter().enumerate() {
-            let (x, y) = xy(i, *v);
-            if i == 0 {
-                ctx.move_to(x, y);
-            } else {
-                ctx.line_to(x, y);
+        let mut prev: Option<(f64, f64)> = None;
+        for p in &pts {
+            let (x, y) = xy(p.0, p.1);
+            match prev {
+                None => ctx.move_to(x, y),
+                Some((_, py)) => {
+                    ctx.line_to(x, py);
+                    ctx.line_to(x, y);
+                }
             }
+            prev = Some((x, y));
         }
         ctx.stroke();
         ctx.restore();
 
-        // endpoint dot
-        let (ex, ey) = xy(n - 1, vals[n - 1]);
+        let last = pts[pts.len() - 1];
+        let (lx, ly) = xy(last.0, last.1);
         set_fill(&ctx, "#eaf2ff");
         ctx.begin_path();
-        let _ = ctx.arc(ex, ey, 3.0, 0.0, 6.2832);
+        let _ = ctx.arc(lx, ly, 3.0, 0.0, 6.2832);
         ctx.fill();
+
+        // hover: crosshair + the reading at that minute
+        let hx = hover.get_untracked();
+        if hx >= x0 && hx <= x1 {
+            let t = tmin + (hx - x0) / (x1 - x0) * (tmax - tmin);
+            let mut best = &pts[0];
+            for p in &pts {
+                if p.0 <= t {
+                    best = p;
+                }
+            }
+            let (bx, by) = xy(t, best.1);
+            set_stroke(&ctx, "#3b496b");
+            ctx.set_line_width(1.0);
+            ctx.begin_path();
+            ctx.move_to(bx, y0);
+            ctx.line_to(bx, y1);
+            ctx.stroke();
+            set_fill(&ctx, "#eaf2ff");
+            ctx.begin_path();
+            let _ = ctx.arc(bx, by, 3.5, 0.0, 6.2832);
+            ctx.fill();
+            let label = format!(
+                "{} UTC · {} tokens · {} pages",
+                hhmm(t as i64),
+                grouped(best.1 as u64),
+                grouped(best.2 as u64)
+            );
+            let tw = label.chars().count() as f64 * 6.1 + 14.0;
+            let tx = (bx + 10.0).min(x1 - tw).max(x0);
+            let ty = (by - 30.0).max(y0);
+            ctx.set_global_alpha(0.94);
+            set_fill(&ctx, "#060a16");
+            ctx.fill_rect(tx, ty, tw, 20.0);
+            set_stroke(&ctx, "#1b2a4a");
+            ctx.stroke_rect(tx, ty, tw, 20.0);
+            ctx.set_global_alpha(1.0);
+            set_fill(&ctx, "#eaf2ff");
+            let _ = ctx.fill_text(&label, tx + 7.0, ty + 14.0);
+        }
     });
 }
 

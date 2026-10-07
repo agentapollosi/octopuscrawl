@@ -38,9 +38,14 @@ struct GN {
     vy: f64,
     r: f64,
     color: &'static str,
+    chap: usize,
     host: String,
     title: String,
     age: f64,
+}
+
+fn chap_index(ch: &str) -> usize {
+    CHAPTERS.iter().position(|c| *c == ch).unwrap_or(CHAPTERS.len())
 }
 
 fn frand(s: &mut u64) -> f64 {
@@ -126,6 +131,7 @@ fn start(canvas: HtmlCanvasElement, live: Live, hover: RwSignal<(f64, f64)>) {
     let mut idx: HashMap<String, usize> = HashMap::new();
     let mut seed = 0x51ED_270B_1CA7_E5A3u64;
     let mut last = 0.0f64;
+    let mut synced_once = false;
 
     run_raf(move |t| {
         let dpr = window().device_pixel_ratio().max(1.0);
@@ -145,22 +151,34 @@ fn start(canvas: HtmlCanvasElement, live: Live, hover: RwSignal<(f64, f64)>) {
         let dt = if last == 0.0 { 0.016 } else { ((t - last) / 1000.0).min(0.05) };
         last = t;
 
-        // sync new nodes in from the live graph (keep existing positions)
+        // sync new nodes in from the live graph (keep existing positions). The
+        // first batch is the saved map; pages arriving after that are fresh reads
+        // and land with a ripple.
+        let fresh_age = if synced_once { 0.0 } else { 2.3 };
         live.nodes.with_untracked(|lns| {
+            if !lns.is_empty() {
+                synced_once = true;
+            }
             for n in lns {
                 if !idx.contains_key(&n.id) {
-                    let ang = frand(&mut seed) * std::f64::consts::TAU;
-                    let rad = 30.0 + frand(&mut seed) * cw.min(ch) * 0.28;
+                    let chk = n.chapter.as_deref().unwrap_or("");
+                    let ci = chap_index(chk);
+                    // spawn near this node's chapter lobe so it settles fast
+                    let ca = ci as f64 / CHAPTERS.len() as f64 * std::f64::consts::TAU + t / 1000.0 * 0.05;
+                    let anchor_r = cw.min(ch) * 0.30;
+                    let jx = (frand(&mut seed) - 0.5) * 60.0;
+                    let jy = (frand(&mut seed) - 0.5) * 60.0;
                     nodes.push(GN {
-                        x: cw * 0.5 + ang.cos() * rad,
-                        y: ch * 0.5 + ang.sin() * rad,
+                        x: cw * 0.5 + ca.cos() * anchor_r + jx,
+                        y: ch * 0.5 + ca.sin() * anchor_r + jy,
                         vx: 0.0,
                         vy: 0.0,
-                        r: (2.2 + (n.tokens as f64).sqrt() * 0.22).min(13.0),
-                        color: chapter_color(n.chapter.as_deref().unwrap_or("")),
+                        r: (1.8 + (n.tokens as f64).sqrt() * 0.09).min(6.5),
+                        color: chapter_color(chk),
+                        chap: ci,
                         host: host_of(&n.url),
                         title: n.title.clone(),
-                        age: 0.0,
+                        age: fresh_age,
                     });
                     idx.insert(n.id.clone(), nodes.len() - 1);
                 }
@@ -177,23 +195,39 @@ fn start(canvas: HtmlCanvasElement, live: Live, hover: RwSignal<(f64, f64)>) {
         let cx = cw * 0.5;
         let cy = ch * 0.5;
 
+        // chapter lobes sit on a ring that turns slowly, so the whole map keeps
+        // drifting (never freezes into a dead blob) and reads cluster-by-chapter
+        let spin = t / 1000.0 * 0.05;
+        let anchor_r = cw.min(ch) * 0.31;
+        let nc = CHAPTERS.len() as f64;
+        let anchor = |ci: usize| -> (f64, f64) {
+            let a = ci as f64 / nc * std::f64::consts::TAU + spin;
+            (cx + a.cos() * anchor_r, cy + a.sin() * anchor_r)
+        };
+
         // --- forces ---
-        // repulsion (O(n^2), fine for a few hundred nodes)
+        // repulsion (O(n^2), fine for a few hundred nodes) — strong enough that
+        // nodes spread into readable lobes instead of collapsing together
         for i in 0..n {
             for j in (i + 1)..n {
                 let dx = nodes[i].x - nodes[j].x;
                 let dy = nodes[i].y - nodes[j].y;
-                let d2 = (dx * dx + dy * dy).max(16.0);
-                let f = 900.0 / d2;
+                let d2 = (dx * dx + dy * dy).max(4.0);
                 let d = d2.sqrt();
                 let (ux, uy) = (dx / d, dy / d);
+                let mut f = 1500.0 / d2;
+                // hard spacing: nodes never sit on top of each other
+                let gap = nodes[i].r + nodes[j].r + 4.0;
+                if d < gap {
+                    f += (gap - d) * 18.0;
+                }
                 nodes[i].vx += ux * f * dt;
                 nodes[i].vy += uy * f * dt;
                 nodes[j].vx -= ux * f * dt;
                 nodes[j].vy -= uy * f * dt;
             }
         }
-        // springs along real edges
+        // springs along real edges — keep followed links taut and close
         for (a, b) in &edges {
             let (a, b) = (*a, *b);
             if a == b {
@@ -202,38 +236,83 @@ fn start(canvas: HtmlCanvasElement, live: Live, hover: RwSignal<(f64, f64)>) {
             let dx = nodes[b].x - nodes[a].x;
             let dy = nodes[b].y - nodes[a].y;
             let d = (dx * dx + dy * dy).sqrt().max(1.0);
-            let rest = 70.0;
-            let f = (d - rest) * 0.9 * dt;
+            let rest = 24.0;
+            let f = (d - rest) * 0.6 * dt;
             let (ux, uy) = (dx / d, dy / d);
             nodes[a].vx += ux * f;
             nodes[a].vy += uy * f;
             nodes[b].vx -= ux * f;
             nodes[b].vy -= uy * f;
         }
-        // centering + damping + integrate
+        // pull each node toward its chapter lobe + a weak global centre; light
+        // damping so motion lingers instead of dying out
         for nd in nodes.iter_mut() {
-            nd.vx += (cx - nd.x) * 0.45 * dt;
-            nd.vy += (cy - nd.y) * 0.45 * dt;
-            nd.vx *= 0.86;
-            nd.vy *= 0.86;
+            let (ax, ay) = anchor(nd.chap);
+            nd.vx += (ax - nd.x) * 0.32 * dt;
+            nd.vy += (ay - nd.y) * 0.32 * dt;
+            nd.vx += (cx - nd.x) * 0.03 * dt;
+            nd.vy += (cy - nd.y) * 0.03 * dt;
+            nd.vx *= 0.88;
+            nd.vy *= 0.88;
             nd.x += nd.vx;
             nd.y += nd.vy;
-            let m = 10.0;
+            let m = 12.0;
             nd.x = nd.x.clamp(m, cw - m);
             nd.y = nd.y.clamp(m, ch - m);
             nd.age += dt;
+        }
+
+        // --- hover: nearest node + the nodes it links to ---
+        let (hx, hy) = hover.get_untracked();
+        let mut hover_idx: Option<usize> = None;
+        if hx >= 0.0 {
+            let mut bd = 20.0 * 20.0;
+            for (i, nd) in nodes.iter().enumerate() {
+                let dx = nd.x - hx;
+                let dy = nd.y - hy;
+                let d2 = dx * dx + dy * dy;
+                if d2 < bd {
+                    bd = d2;
+                    hover_idx = Some(i);
+                }
+            }
+        }
+        let mut connected: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        if let Some(h) = hover_idx {
+            connected.insert(h);
+            for (a, b) in &edges {
+                if *a == h {
+                    connected.insert(*b);
+                } else if *b == h {
+                    connected.insert(*a);
+                }
+            }
         }
 
         // --- draw ---
         ctx.set_global_alpha(1.0);
         ctx.clear_rect(0.0, 0.0, cw, ch);
 
-        // edges
-        set_stroke(&ctx, "#1a2b52");
+        // edges — the hovered node's links light up, the rest recede
         ctx.set_line_width(1.0);
-        ctx.set_global_alpha(0.5);
         for (a, b) in &edges {
             let (a, b) = (*a, *b);
+            let hot = hover_idx.map_or(false, |h| a == h || b == h);
+            if let Some(_) = hover_idx {
+                if hot {
+                    set_stroke(&ctx, "#2ad4ff");
+                    ctx.set_line_width(1.5);
+                    ctx.set_global_alpha(0.85);
+                } else {
+                    set_stroke(&ctx, "#132038");
+                    ctx.set_line_width(1.0);
+                    ctx.set_global_alpha(0.22);
+                }
+            } else {
+                set_stroke(&ctx, "#2b4f86");
+                ctx.set_line_width(1.0);
+                ctx.set_global_alpha(0.55);
+            }
             ctx.begin_path();
             ctx.move_to(nodes[a].x, nodes[a].y);
             ctx.line_to(nodes[b].x, nodes[b].y);
@@ -241,35 +320,48 @@ fn start(canvas: HtmlCanvasElement, live: Live, hover: RwSignal<(f64, f64)>) {
         }
         ctx.set_global_alpha(1.0);
 
-        // nodes
+        // a ripple where a page has just been read
         for nd in nodes.iter() {
+            if nd.age < 2.2 && nodes.len() > 1 {
+                let k = nd.age / 2.2;
+                set_stroke(&ctx, nd.color);
+                ctx.set_line_width(1.5);
+                ctx.set_global_alpha(0.8 * (1.0 - k));
+                ctx.begin_path();
+                let _ = ctx.arc(nd.x, nd.y, nd.r + 4.0 + k * 34.0, 0.0, std::f64::consts::TAU);
+                ctx.stroke();
+            }
+        }
+        ctx.set_global_alpha(1.0);
+
+        // nodes — hovered + connected grow and stay bright, the rest dim
+        for (i, nd) in nodes.iter().enumerate() {
             let pop = (nd.age / 0.6).min(1.0);
-            let r = nd.r * (0.3 + 0.7 * pop);
+            let focus = connected.contains(&i);
+            let faded = hover_idx.is_some() && !focus;
+            let scale = if hover_idx == Some(i) {
+                1.5
+            } else if focus {
+                1.15
+            } else {
+                1.0
+            };
+            let r = nd.r * (0.3 + 0.7 * pop) * scale;
             ctx.save();
-            ctx.set_shadow_blur(8.0);
+            ctx.set_shadow_blur(if focus { 12.0 } else { 8.0 });
             ctx.set_shadow_color(nd.color);
             set_fill(&ctx, nd.color);
+            ctx.set_global_alpha(if faded { 0.3 } else { 1.0 });
             ctx.begin_path();
             let _ = ctx.arc(nd.x, nd.y, r, 0.0, std::f64::consts::TAU);
             ctx.fill();
             ctx.restore();
         }
+        ctx.set_global_alpha(1.0);
 
-        // hover: nearest node within a small radius → label it
-        let (hx, hy) = hover.get_untracked();
-        if hx >= 0.0 {
-            let mut best: Option<usize> = None;
-            let mut bd = 18.0 * 18.0;
-            for (i, nd) in nodes.iter().enumerate() {
-                let dx = nd.x - hx;
-                let dy = nd.y - hy;
-                let d2 = dx * dx + dy * dy;
-                if d2 < bd {
-                    bd = d2;
-                    best = Some(i);
-                }
-            }
-            if let Some(i) = best {
+        // hover label
+        {
+            if let Some(i) = hover_idx {
                 let nd = &nodes[i];
                 // ring
                 set_stroke(&ctx, "#eaf2ff");

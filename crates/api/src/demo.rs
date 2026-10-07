@@ -2,7 +2,6 @@
 //! a believable live feed so the frontend has something to render. Everything it
 //! produces is read-only, public-host flavoured, and phrased defensively.
 
-use chrono::Utc;
 use octopuscrawl_core::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -65,7 +64,7 @@ static LINKS_SEQ: AtomicU64 = AtomicU64::new(1);
 static PAGE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub fn seed_crawlers(n: usize) -> Vec<Crawler> {
-    let now = Utc::now();
+    let now = crate::clock::now();
     (0..n)
         .map(|i| {
             let mut r = Lcg::new(0x1234_5678 ^ (i as u64).wrapping_mul(2654435761));
@@ -92,7 +91,7 @@ pub fn seed_crawlers(n: usize) -> Vec<Crawler> {
 }
 
 pub fn seed_stats(crawlers: &[Crawler]) -> Stats {
-    let now = Utc::now();
+    let now = crate::clock::now();
     let running = crawlers.iter().filter(|c| c.status == CrawlerStatus::Crawling).count() as u32;
     let pages: u64 = crawlers.iter().map(|c| c.pages_read).sum();
     // no model is trained yet — the crawl is still collecting the corpus
@@ -119,13 +118,13 @@ pub fn seed_stats(crawlers: &[Crawler]) -> Stats {
         weights_url: None,
     };
     let chapters = vec![
-        chapter("advisories", 1, "advisories", 180, 0, ChapterStatus::Active),
-        chapter("patches", 2, "patches", 160, 0, ChapterStatus::Active),
-        chapter("standards", 3, "standards", 90, 0, ChapterStatus::Active),
-        chapter("writeups", 4, "writeups", 140, 0, ChapterStatus::Active),
-        chapter("tooling", 5, "tooling", 110, 0, ChapterStatus::Active),
+        chapter("advisories", 1, "advisories", 1500, 0, ChapterStatus::Active),
+        chapter("patches", 2, "patches", 800, 0, ChapterStatus::Active),
+        chapter("standards", 3, "standards", 1200, 0, ChapterStatus::Active),
+        chapter("writeups", 4, "writeups", 600, 0, ChapterStatus::Active),
+        chapter("tooling", 5, "tooling", 300, 0, ChapterStatus::Active),
         chapter("forums", 6, "forums", 0, 0, ChapterStatus::Locked),
-        chapter("rfcs", 7, "rfcs", 0, 0, ChapterStatus::Locked),
+        chapter("rfcs", 7, "rfcs", 120, 0, ChapterStatus::Active),
     ];
     Stats {
         crawlers_total: crawlers.len() as u32,
@@ -152,7 +151,7 @@ pub fn tick_crawler(c: &mut Crawler, r: &mut Lcg) -> Option<(WebNode, LedgerEntr
     let (host, path, title) = SEEDS[r.below(SEEDS.len())];
     c.url = format!("https://{host}{path}");
     c.title = title.to_string();
-    c.updated_at = Utc::now();
+    c.updated_at = crate::clock::now();
     let tmpl = THOUGHTS[r.below(THOUGHTS.len())];
     c.thought = tmpl
         .replace("{host}", host)
@@ -174,11 +173,11 @@ pub fn tick_crawler(c: &mut Crawler, r: &mut Lcg) -> Option<(WebNode, LedgerEntr
             project_id: None,
             tokens,
             crawler_id: c.id.clone(),
-            read_at: Utc::now(),
+            read_at: crate::clock::now(),
         };
         let entry = LedgerEntry {
             id: format!("led-{pid:016x}"),
-            at: Utc::now(),
+            at: crate::clock::now(),
             kind: LedgerKind::Crawl,
             sol: -(tokens as f64) * 1.2e-9,
             usd: -(tokens as f64) * 1.5e-7,

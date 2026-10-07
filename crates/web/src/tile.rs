@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlImageElement};
 
-use crate::octopus::Octopus;
+use crate::octopus::{DocBox, Octopus};
 use crate::raf::{run_raf, window};
 use crate::ws::{http_base, Live};
 
@@ -29,6 +29,7 @@ pub fn Tile(id: String) -> impl IntoView {
     }
 
     let s_name = snap.clone();
+    let s_owner = snap.clone();
     let s_status = snap.clone();
     let s_letter = snap.clone();
     let s_host = snap.clone();
@@ -42,7 +43,18 @@ pub fn Tile(id: String) -> impl IntoView {
             </div>
             <div class="tile__ft">
                 <div class="tile__row">
-                    <span class="tile__name">{move || s_name().map(|c| c.name).unwrap_or_default()}</span>
+                    <span class="tile__name">
+                        {move || s_name().map(|c| c.name).unwrap_or_default()}
+                        {move || s_owner().and_then(|c| c.owner).map(|o| {
+                            let n = o.chars().count();
+                            let short = if n > 8 {
+                                format!("{}…{}", o.chars().take(4).collect::<String>(), o.chars().skip(n - 4).collect::<String>())
+                            } else {
+                                o.clone()
+                            };
+                            view! { <span class="owned" title=o>"◆ "{short}</span> }
+                        })}
+                    </span>
                     <span class=move || s_status().map(|c| status_cls(&c)).unwrap_or("s")>
                         {move || s_letter().map(|c| c.status.letter().to_string()).unwrap_or_default()}
                     </span>
@@ -94,21 +106,26 @@ fn start_tile(canvas: HtmlCanvasElement, img: HtmlImageElement, live: Live, id: 
             }
             let sx = cw / 1280.0;
             let sy = ch / 800.0;
-            let mut boxes: Vec<([f64; 4], u8)> = fc
+            let mut boxes: Vec<DocBox> = fc
                 .links
                 .iter()
+                .filter(|b| b.y >= 0.0 && b.y + b.h <= 800.0)
                 .map(|b| {
                     let kind = match b.kind {
                         octopuscrawl_core::BoxKind::Head => 1u8,
                         octopuscrawl_core::BoxKind::Text => 2u8,
                         octopuscrawl_core::BoxKind::Link => 0u8,
                     };
-                    ([b.x as f64 * sx, b.y as f64 * sy, b.w as f64 * sx, b.h as f64 * sy], kind)
+                    DocBox {
+                        rect: [b.x as f64 * sx, b.y as f64 * sy, b.w as f64 * sx, b.h as f64 * sy],
+                        kind,
+                        tag: None,
+                    }
                 })
                 .collect();
             boxes.sort_by(|a, b| {
-                a.0[1].partial_cmp(&b.0[1]).unwrap_or(std::cmp::Ordering::Equal)
-                    .then(a.0[0].partial_cmp(&b.0[0]).unwrap_or(std::cmp::Ordering::Equal))
+                a.rect[1].partial_cmp(&b.rect[1]).unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.rect[0].partial_cmp(&b.rect[0]).unwrap_or(std::cmp::Ordering::Equal))
             });
             Some((fc.links_seq, boxes))
         });
@@ -116,8 +133,8 @@ fn start_tile(canvas: HtmlCanvasElement, img: HtmlImageElement, live: Live, id: 
         sim.resize(cw, ch);
         match doc {
             Some((seq, boxes)) => {
-                sim.set_doc(boxes, seq);
                 if seq != img_seq {
+                    sim.set_doc(boxes);
                     img_seq = seq;
                     img.set_src(&format!("{}/v1/crawlers/{id}/frame.jpg?seq={seq}", http_base()));
                     img.set_hidden(false);
@@ -132,6 +149,8 @@ fn start_tile(canvas: HtmlCanvasElement, img: HtmlImageElement, live: Live, id: 
             }
         }
         sim.step(dt);
+        // the page itself is the <img> under this canvas
+        ctx.clear_rect(0.0, 0.0, cw, ch);
         sim.draw(&ctx);
     });
 }

@@ -20,5 +20,5 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 web-sys = { version = "0.3", features = [
   "Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement",
   "HtmlImageElement", "CanvasRenderingContext2d", "EventTarget", "KeyboardEvent",
-  "Location",
+  "Location", "CanvasGradient",
 ] }

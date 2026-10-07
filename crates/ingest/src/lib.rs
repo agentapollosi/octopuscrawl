@@ -39,6 +39,9 @@ pub struct Ingest {
     dataset: PathBuf,
     tokenizer_path: PathBuf,
     dedup: Vec<u64>,
+    /// Every URL already in the dataset — a page is counted once, ever, even if
+    /// its content changes between reads.
+    urls: std::collections::HashSet<String>,
     tok: Option<Tokenizer>,
     texts: Vec<String>,
     accepted: usize,
@@ -61,19 +64,66 @@ impl Ingest {
         let _ = fs::create_dir_all(&dir);
         let dataset = dir.join("corpus.jsonl");
         let tokenizer_path = dir.join("tokenizer.json");
-        // Resume across restarts: reload the trained tokenizer and the accepted
-        // page count so the vocabulary and dataset progress carry over instead
-        // of resetting to zero on every redeploy.
+        // Resume across restarts: reload the trained tokenizer, rebuild the dedup
+        // set from the existing corpus (so re-read seeds are not appended again),
+        // and keep one record per URL — rewriting the file de-duplicated so a
+        // restart never piles up copies. This keeps the dataset + counters stable
+        // across redeploys instead of resetting / growing duplicates.
         let tok = Tokenizer::from_file(&tokenizer_path).ok();
-        let accepted = fs::read_to_string(&dataset)
-            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
-            .unwrap_or(0);
+
+        let mut dedup = Vec::new();
+        let mut texts = Vec::new();
+        let mut unique_lines: Vec<String> = Vec::new();
+        let mut seen_urls = std::collections::HashSet::new();
+        let mut had_dupes = false;
+        if let Ok(body) = fs::read_to_string(&dataset) {
+            for line in body.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    let url = v.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                    if url.is_empty() || !seen_urls.insert(url.to_string()) {
+                        had_dupes = true;
+                        continue;
+                    }
+                    let mut v = v;
+                    if let Some(t) = v.get("text").and_then(|t| t.as_str()) {
+                        let cleaned = redact_emails(t);
+                        if cleaned != t {
+                            had_dupes = true; // forces a rewrite of the cleaned file
+                            v["text"] = serde_json::Value::String(cleaned);
+                        }
+                    }
+                    unique_lines.push(serde_json::to_string(&v).unwrap_or_else(|_| line.to_string()));
+                    if let Some(t) = v.get("text").and_then(|t| t.as_str()) {
+                        dedup.push(simhash(t));
+                        texts.push(t.chars().take(4000).collect());
+                    }
+                }
+            }
+        }
+        if texts.len() > 500 {
+            let n = texts.len() - 500;
+            texts.drain(0..n);
+        }
+        let accepted = unique_lines.len();
+        if had_dupes {
+            let mut out = unique_lines.join("\n");
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            let _ = fs::write(&dataset, out);
+        }
+
         Ingest {
             dataset,
             tokenizer_path,
-            dedup: Vec::new(),
+            dedup,
+            urls: seen_urls,
             tok,
-            texts: Vec::new(),
+            texts,
             accepted,
             last_train: accepted,
         }
@@ -121,11 +171,18 @@ impl Ingest {
     /// Process one crawled page. Returns whether it was accepted (not a
     /// near-duplicate) and its real token count.
     pub fn process(&mut self, url: &str, host: &str, chapter: &str, title: &str, text: &str) -> Ingested {
+        if self.urls.contains(url) {
+            return Ingested { accepted: false, tokens: 0 };
+        }
+        // personal contact details never reach the dataset
+        let clean = redact_emails(text);
+        let text = clean.as_str();
         let h = simhash(text);
         if self.dedup.iter().any(|s| hamming(*s, h) < DUP_DISTANCE) {
             return Ingested { accepted: false, tokens: 0 };
         }
         self.dedup.push(h);
+        self.urls.insert(url.to_string());
 
         let tokens = self.count(text) as u32;
         self.append(url, host, chapter, title, text, tokens);
@@ -222,4 +279,63 @@ fn fnv1a(s: &str) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     }
     h
+}
+
+
+/// Replace e-mail addresses with `[email]` so no personal contact detail is kept.
+pub fn redact_emails(text: &str) -> String {
+    fn local(c: char) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-')
+    }
+    fn domain(c: char) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, '.' | '-')
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut start_ok = 0; // chars before this index are already in `out`
+    while i < chars.len() {
+        if chars[i] == '@' {
+            let mut a = i;
+            while a > start_ok && local(chars[a - 1]) {
+                a -= 1;
+            }
+            let mut b = i + 1;
+            while b < chars.len() && domain(chars[b]) {
+                b += 1;
+            }
+            // trim a trailing dot ("mail me at x@y.com.")
+            while b > i + 1 && chars[b - 1] == '.' {
+                b -= 1;
+            }
+            let dom: String = chars[i + 1..b].iter().collect();
+            let tld_ok = dom
+                .rsplit_once('.')
+                .map(|(l, t)| !l.is_empty() && t.len() >= 2 && t.chars().all(|c| c.is_ascii_alphabetic()))
+                .unwrap_or(false);
+            if a < i && tld_ok {
+                out.extend(&chars[start_ok..a]);
+                out.push_str("[email]");
+                start_ok = b;
+                i = b;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.extend(&chars[start_ok..]);
+    out
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_emails;
+
+    #[test]
+    fn redacts_addresses_only() {
+        assert_eq!(redact_emails("mail secure@example.org now."), "mail [email] now.");
+        assert_eq!(redact_emails("a.b+c@sub.mail.co.uk"), "[email]");
+        assert_eq!(redact_emails("git@ and @user and x@y"), "git@ and @user and x@y");
+        assert_eq!(redact_emails("no email here"), "no email here");
+    }
 }

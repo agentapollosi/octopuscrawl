@@ -448,12 +448,17 @@ fn start(canvas: HtmlCanvasElement, live: Live) {
             viz.h = ch;
         }
 
-        // fill = dataset progress toward the next version's target tokens
+        // fill = new pages read since the live version, toward what the next needs
+        // (full while the next version is training)
         let fill = live.stats.with_untracked(|s| {
             s.as_ref()
                 .map(|s| {
-                    let target = s.next_queen.dataset_tokens.max(1) as f64;
-                    (s.dataset_tokens as f64 / target).min(1.0)
+                    if s.next_queen.status == octopuscrawl_core::QueenStatus::Training {
+                        return 1.0;
+                    }
+                    let base = s.queen.dataset_pages as f64;
+                    let need = (s.next_queen.dataset_pages as f64 - base).max(1.0);
+                    ((s.pages_read as f64 - base) / need).clamp(0.0, 1.0)
                 })
                 .unwrap_or(0.0)
         });

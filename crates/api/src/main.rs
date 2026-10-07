@@ -4,12 +4,19 @@
 //! loop is swapped for the real chromiumoxide crawler engine later; the wire
 //! shape (`LiveMsg`) and the broadcast fan-out stay the same.
 
+mod clock;
 mod corpus;
 mod demo;
 mod frames;
+mod history;
+mod sponsor;
 mod treasury;
 #[cfg(feature = "real")]
 mod crawl;
+#[cfg(feature = "real")]
+mod discover;
+#[cfg(feature = "real")]
+mod frontier;
 #[cfg(feature = "real")]
 mod brain;
 
@@ -48,6 +55,8 @@ struct AppState {
     graph: RwLock<GraphSnapshot>,
     vocab: RwLock<VocabStats>,
     treasury: RwLock<TreasurySnapshot>,
+    history: RwLock<Vec<HistPoint>>,
+    sponsors: RwLock<sponsor::Book>,
 }
 
 /// On-disk dataset the crawl produces (relative to the server's working dir).
@@ -81,7 +90,10 @@ fn spawn_graph_saver(state: Arc<AppState>) {
 
 #[tokio::main]
 async fn main() {
-    let crawlers = demo::seed_crawlers(24);
+    let mut crawlers = demo::seed_crawlers(24);
+    // sponsored hatchlings come back after a restart, with their tallies
+    let book = sponsor::Book::load();
+    crawlers.extend(book.sponsors.iter().map(sponsor::crawler_for));
     let stats = demo::seed_stats(&crawlers);
     let (tx, _rx) = broadcast::channel::<LiveMsg>(1024);
     let state = Arc::new(AppState {
@@ -92,11 +104,15 @@ async fn main() {
         graph: RwLock::new(load_graph()),
         vocab: RwLock::new(VocabStats::default()),
         treasury: RwLock::new(TreasurySnapshot::default()),
+        history: RwLock::new(history::load()),
+        sponsors: RwLock::new(book),
     });
 
+    clock::spawn();
     spawn_engine(state.clone());
     spawn_graph_saver(state.clone());
     treasury::spawn_poller(state.clone());
+    history::spawn_sampler(state.clone());
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -111,6 +127,9 @@ async fn main() {
         .route("/v1/dataset.jsonl", get(get_dataset))
         .route("/v1/dataset/meta", get(get_dataset_meta))
         .route("/v1/treasury", get(get_treasury))
+        .route("/v1/history", get(get_history))
+        .route("/v1/sponsors", get(get_sponsors))
+        .route("/v1/spawn", axum::routing::post(post_spawn))
         .route("/v1/live", get(ws_upgrade))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -123,6 +142,32 @@ async fn main() {
 
 async fn get_stats(State(state): State<Arc<AppState>>) -> Json<Stats> {
     Json(state.snapshot.read().await.stats.clone())
+}
+
+async fn get_sponsors(State(state): State<Arc<AppState>>) -> Json<Vec<SponsorView>> {
+    Json(state.sponsors.read().await.views())
+}
+
+#[derive(Deserialize)]
+struct SpawnReq {
+    wallet: String,
+}
+
+/// Verify on-chain that `wallet` sent $OCTO to the treasury, and spawn its
+/// hatchlings. Read-only: the server never signs or moves anything.
+async fn post_spawn(State(state): State<Arc<AppState>>, Json(req): Json<SpawnReq>) -> Json<SpawnResult> {
+    Json(sponsor::claim(&state, &req.wallet).await)
+}
+
+#[derive(Deserialize)]
+struct HistQ {
+    hours: Option<i64>,
+}
+
+async fn get_history(Query(q): Query<HistQ>, State(state): State<Arc<AppState>>) -> Json<Vec<HistPoint>> {
+    let hours = q.hours.unwrap_or(24).clamp(1, 168);
+    let h = state.history.read().await;
+    Json(history::window(&h, hours, 480))
 }
 
 async fn get_graph(State(state): State<Arc<AppState>>) -> Json<GraphSnapshot> {
@@ -160,35 +205,36 @@ async fn get_dataset_meta(State(_state): State<Arc<AppState>>) -> Json<DatasetMe
 }
 
 async fn get_dataset(State(_state): State<Arc<AppState>>) -> Response {
-    match tokio::fs::read(DATASET_PATH).await {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "application/x-ndjson; charset=utf-8"),
-                (
-                    header::CONTENT_DISPOSITION,
-                    "attachment; filename=\"octopuscrawl-corpus.jsonl\"",
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "dataset not ready yet").into_response(),
-    }
+    // The dataset is not public — the site shows what the queen has read, but the
+    // corpus itself is not distributed.
+    (
+        StatusCode::FORBIDDEN,
+        "the dataset is not available for download",
+    )
+        .into_response()
 }
 
 async fn get_crawlers(State(state): State<Arc<AppState>>) -> Json<Vec<Crawler>> {
     Json(state.snapshot.read().await.crawlers.clone())
 }
 
-async fn get_frame(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> Response {
-    match state.frames.get(&id) {
+#[derive(Deserialize)]
+struct FrameQ {
+    seq: Option<u64>,
+}
+
+async fn get_frame(
+    Path(id): Path<String>,
+    Query(q): Query<FrameQ>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    match state.frames.get(&id, q.seq) {
         Some((_seq, jpeg)) => (
             [
                 (header::CONTENT_TYPE, "image/jpeg"),
                 (header::CACHE_CONTROL, "no-store"),
             ],
-            jpeg,
+            (*jpeg).clone(),
         )
             .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -240,21 +286,12 @@ async fn queen_generate(Query(gq): Query<GenQuery>, State(_state): State<Arc<App
 
 /// Download the queen's actual weights (safetensors).
 async fn queen_weights(State(_state): State<Arc<AppState>>) -> Response {
-    match tokio::fs::read("data/queen.safetensors").await {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "application/octet-stream"),
-                (
-                    header::CONTENT_DISPOSITION,
-                    "attachment; filename=\"octopuscrawl-queen-v1.safetensors\"",
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "the queen has no trained weights yet").into_response(),
-    }
+    // The trained weights are not distributed.
+    (
+        StatusCode::FORBIDDEN,
+        "the queen's weights are not available for download",
+    )
+        .into_response()
 }
 
 /// Start the live data source: the real crawl engine when built with
@@ -279,7 +316,7 @@ async fn stats_broadcaster(state: Arc<AppState>) {
         tokio::time::sleep(Duration::from_millis(2000)).await;
         let stats = {
             let mut snap = state.snapshot.write().await;
-            snap.stats.updated_at = chrono::Utc::now();
+            snap.stats.updated_at = crate::clock::now();
             snap.stats.clone()
         };
         let _ = state.tx.send(LiveMsg::Stats { stats });
@@ -393,7 +430,7 @@ async fn run_demo(state: Arc<AppState>) {
         if ticks % 3 == 0 {
             let stats = {
                 let mut snap = state.snapshot.write().await;
-                snap.stats.updated_at = chrono::Utc::now();
+                snap.stats.updated_at = crate::clock::now();
                 snap.stats.clone()
             };
             let _ = state.tx.send(LiveMsg::Stats { stats });

@@ -1,11 +1,13 @@
 mod app;
 mod bg;
+mod feed;
 mod graph;
 mod octopus;
 mod queen;
 mod raf;
 mod scene;
 mod stats;
+mod swarm;
 mod tile;
 mod vocab;
 mod ws;

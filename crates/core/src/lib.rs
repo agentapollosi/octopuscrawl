@@ -47,6 +47,8 @@ pub enum QueenStatus {
     Retired,
     Live,
     Funding,
+    /// The next version is gathering the pages it will be trained on.
+    Collecting,
     Training,
 }
 
@@ -209,6 +211,42 @@ pub struct GraphSnapshot {
     pub edges: Vec<Edge>,
 }
 
+/// A hatchling a holder sponsored by sending $OCTO to the treasury.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SponsorView {
+    /// The wallet that sent the $OCTO (public on-chain).
+    pub wallet: String,
+    pub crawler_id: String,
+    pub name: String,
+    /// New pages this hatchling has added to the dataset.
+    pub pages: u64,
+    pub tokens: u64,
+    pub since: DateTime<Utc>,
+}
+
+/// The answer to a spawn request.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnResult {
+    pub ok: bool,
+    pub message: String,
+    /// Names of hatchlings spawned by this request.
+    pub spawned: Vec<String>,
+    /// $OCTO found in new transfers from the wallet to the treasury.
+    pub found: f64,
+    /// Unused $OCTO credit carried toward the next hatchling.
+    pub credit: f64,
+}
+
+/// One point of the dataset's growth over time (unix seconds).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+pub struct HistPoint {
+    pub t: i64,
+    pub pages: u64,
+    pub tokens: u64,
+}
+
 /// The queen's forming vocabulary — a real BPE tokenizer trained on the crawl.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -257,6 +295,28 @@ pub struct TreasurySnapshot {
     /// Whether the last RPC read succeeded (false before the first poll).
     pub ok: bool,
     pub txs: Vec<TreasuryTx>,
+    /// The project token, read live from its mint account.
+    #[serde(default)]
+    pub token: TokenInfo,
+}
+
+/// The project token as the chain reports it (read-only).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenInfo {
+    pub mint: String,
+    pub symbol: String,
+    /// Total supply in whole tokens.
+    pub supply: f64,
+    pub decimals: u8,
+    /// None = revoked (no one can mint more).
+    pub mint_authority: Option<String>,
+    /// None = revoked (no one can freeze holders).
+    pub freeze_authority: Option<String>,
+    /// How much of the token the treasury wallet holds.
+    pub treasury_holding: f64,
+    /// Whether the last read of the mint succeeded.
+    pub ok: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

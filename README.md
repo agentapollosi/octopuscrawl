@@ -36,8 +36,15 @@ Built entirely in **Rust**.
 - **Forming vocabulary** — a BPE tokenizer she trains on the crawl itself; the
   security subwords she learns to recognise, surfacing as she reads.
 - **The queen writes** — a small GPT pretrained from scratch on her corpus.
-  Crude at first, sharper the more she reads. The weights are downloadable.
-- **Open dataset** — every page she keeps, published as JSONL.
+  Crude at first, sharper the more she reads. Every 250 new pages, the next
+  version trains itself; the page count it saw is recorded when the run ends.
+- **A crawl that does not run dry** — pages are discovered from every link on
+  each page read, from CISA's Known Exploited Vulnerabilities catalog and from
+  the sitemaps sites publish for crawlers. Reads rotate across sites (politely,
+  never one host back-to-back), content pages first, steering toward whichever
+  chapter is least covered so the dataset grows wide. The queue survives restarts.
+- **Dataset stats** — pages, tokens, hosts and size, live. The corpus itself is
+  the queen's alone and is not distributed.
 - **On-chain treasury** — the project wallet, read live from Solana (balance and
   activity), read-only.
 
@@ -50,20 +57,22 @@ model to the live frontend:
 |---|---|
 | `core` | Shared data models and the `LiveMsg` WebSocket protocol that ties everything together. |
 | `crawler` | Headless-Chromium engine: reads public pages, returns a screenshot and the on-page content boxes. |
-| `ingest` | Canonicalizes, deduplicates (SimHash), tokenizes (BPE) and stores each page into the dataset. |
+| `ingest` | Deduplicates (one record per URL + SimHash near-copies), redacts e-mail addresses, tokenizes (BPE) and stores each page. |
 | `queen` | A from-scratch GPT (candle) pretrained on the corpus — training and text generation. |
 | `api` | Axum REST + WebSocket server; broadcasts live crawler, page, graph and treasury events. |
 | `web` | Leptos (WASM) frontend: the live octopus-over-document view, knowledge graph, queen, treasury. |
 
 The pipeline is **crawl → clean &amp; dedupe → tokenize → pretrain → generate**.
 Links are followed within an allowlist of security hosts, so coverage grows in
-finite, completable chapters; each funded run retrains the queen from scratch and
-the weights ship public.
+finite, completable chapters; every 250 new pages the next queen is pretrained
+from random init. The weights stay private — the source is here so anyone can
+verify how she is made.
 
 ## Guardrails
 
-The engine respects `robots.txt`, never bypasses a paywall or a bot check, strips
-PII before the dataset, and rejects non-security content. It reads both offense
+The engine respects `robots.txt`, never bypasses a paywall or a bot check,
+redacts e-mail addresses before the dataset, and only follows links inside an
+allowlist of security hosts. It reads both offense
 and defense knowledge — so the queen understands how a weakness works *and* how to
 defend against it — but it only ever **reads and documents**. It never executes,
 scans, or attacks anything.

@@ -76,12 +76,22 @@ struct Arm {
     target: Option<usize>,
 }
 
+/// One content box on the captured page, in display space.
+#[derive(Clone)]
+pub struct DocBox {
+    pub rect: [f64; 4],
+    pub kind: u8, // 0 link, 1 heading, 2 body text
+    /// Set when the line carries a key fact (CVE, CVSS, RCE, mitigation, …).
+    pub tag: Option<&'static str>,
+}
+
 #[derive(Clone)]
 struct Target {
     pos: V,
     rect: [f64; 4], // x,y,w,h in display space (w=h=0 in reef mode)
     inked: bool,
     kind: u8, // 0 link, 1 heading, 2 body text
+    tag: Option<&'static str>,
 }
 
 struct Ink {
@@ -91,6 +101,7 @@ struct Ink {
     max_r: f64,
     seed: u64,
     kind: u8,
+    tag: Option<&'static str>,
 }
 
 pub struct Octopus {
@@ -108,8 +119,10 @@ pub struct Octopus {
     rng: Rng,
     caption: String,
     has_doc: bool,
-    doc_seq: u64,
     read_cursor: usize,
+    last_cursor: usize,
+    cursor_age: f64,
+    scan_y: f64,
 }
 
 impl Octopus {
@@ -129,8 +142,10 @@ impl Octopus {
             rng: Rng::new(0xA17E_B0BA),
             caption: String::new(),
             has_doc: false,
-            doc_seq: 0,
             read_cursor: 0,
+            last_cursor: usize::MAX,
+            cursor_age: 0.0,
+            scan_y: 0.0,
         };
         o.rebuild(w, h);
         o.spawn_targets();
@@ -172,39 +187,45 @@ impl Octopus {
         self.caption = c;
     }
 
-    /// Enter/refresh document mode. `boxes` are link/heading rects in DISPLAY
-    /// space (already scaled to the canvas). Resets targets only when the
-    /// document (identified by `seq`) actually changes.
-    pub fn set_doc(&mut self, boxes: Vec<([f64; 4], u8)>, seq: u64) {
+    /// Start reading a new captured page. `boxes` are content rects in DISPLAY
+    /// space (already scaled to the canvas), in reading order.
+    pub fn set_doc(&mut self, boxes: Vec<DocBox>) {
         self.has_doc = true;
-        if seq == self.doc_seq {
-            return;
-        }
-        self.doc_seq = seq;
         self.inks.clear();
         self.targets = boxes
             .into_iter()
-            .map(|(r, kind)| Target {
+            .map(|b| Target {
                 // read a line from its left edge inward, not dead-centre of a
                 // wide paragraph — keeps the tentacle tip on the actual text.
-                pos: V::new(r[0] + (r[2] * 0.5).min(70.0), r[1] + r[3] * 0.5),
-                rect: r,
+                pos: V::new(b.rect[0] + (b.rect[2] * 0.5).min(70.0), b.rect[1] + b.rect[3] * 0.5),
+                rect: b.rect,
                 inked: false,
-                kind,
+                kind: b.kind,
+                tag: b.tag,
             })
             .collect();
-        // defensively keep reading order (top-to-bottom), so the cursor advances
-        // down the page like a reader.
         self.targets
             .sort_by(|a, b| a.rect[1].partial_cmp(&b.rect[1]).unwrap_or(std::cmp::Ordering::Equal));
         self.read_cursor = 0;
+        self.last_cursor = usize::MAX;
+        self.cursor_age = 0.0;
+        self.scan_y = self.targets.first().map_or(0.0, |t| t.rect[1]);
+    }
+
+    /// (lines read, lines on the page, key facts tagged so far)
+    pub fn progress(&self) -> (usize, usize, usize) {
+        if !self.has_doc {
+            return (0, 0, 0);
+        }
+        let done = self.targets.iter().filter(|t| t.inked).count();
+        let keys = self.targets.iter().filter(|t| t.inked && t.tag.is_some()).count();
+        (done, self.targets.len(), keys)
     }
 
     /// Leave document mode and fall back to the reef scene.
     pub fn clear_doc(&mut self) {
         if self.has_doc {
             self.has_doc = false;
-            self.doc_seq = 0;
             self.spawn_targets();
         }
     }
@@ -237,6 +258,7 @@ impl Octopus {
                 rect: [x, y, 0.0, 0.0],
                 inked: false,
                 kind: 0,
+                tag: None,
             });
         }
         self.read_cursor = 0;
@@ -252,6 +274,10 @@ impl Octopus {
         self.move_body(dt);
         self.step_arms(dt);
 
+        if self.has_doc {
+            self.pace_reading(dt);
+        }
+
         for ink in self.inks.iter_mut() {
             ink.age += dt;
         }
@@ -263,6 +289,34 @@ impl Octopus {
                 self.spawn_targets();
             }
         }
+    }
+
+    /// Keep a steady reading rhythm: if no tentacle has reached the current line
+    /// within a beat, she taps it anyway — key facts get a longer look.
+    fn pace_reading(&mut self, dt: f64) {
+        if self.read_cursor != self.last_cursor {
+            self.last_cursor = self.read_cursor;
+            self.cursor_age = 0.0;
+        }
+        self.cursor_age += dt;
+        let Some(t) = self.targets.get(self.read_cursor).cloned() else {
+            return;
+        };
+        let beat = if t.tag.is_some() {
+            0.95
+        } else if t.kind == 1 {
+            0.75
+        } else {
+            0.5
+        };
+        if !t.inked && self.cursor_age > beat {
+            self.targets[self.read_cursor].inked = true;
+            let seed = self.rng.next();
+            self.inks.push(Ink { pos: t.pos, rect: t.rect, age: 0.0, max_r: 0.0, seed, kind: t.kind, tag: t.tag });
+        }
+        // the scanline glides to the line being read
+        let goal = t.rect[1] + t.rect[3] * 0.5;
+        self.scan_y += (goal - self.scan_y) * (dt * 7.0).min(1.0);
     }
 
     fn move_body(&mut self, dt: f64) {
@@ -327,13 +381,13 @@ impl Octopus {
         let heading = self.heading;
         let t_now = self.t;
 
-        let mut new_inks: Vec<(V, [f64; 4], u8)> = Vec::new();
+        let mut new_inks: Vec<(V, [f64; 4], u8, Option<&'static str>)> = Vec::new();
 
         // In document mode only the lines around the reading cursor are in play,
         // so the hatchling works down the page in order instead of darting to a
         // random far line.
         let (lo, hi) = if self.has_doc {
-            (self.read_cursor, (self.read_cursor + 8).min(self.targets.len()))
+            (self.read_cursor, (self.read_cursor + 4).min(self.targets.len()))
         } else {
             (0, self.targets.len())
         };
@@ -403,13 +457,18 @@ impl Octopus {
                     && !self.targets[ti].inked
                 {
                     self.targets[ti].inked = true;
-                    new_inks.push((self.targets[ti].pos, self.targets[ti].rect, self.targets[ti].kind));
+                    new_inks.push((
+                        self.targets[ti].pos,
+                        self.targets[ti].rect,
+                        self.targets[ti].kind,
+                        self.targets[ti].tag,
+                    ));
                 }
             }
         }
 
         let br = self.body_r();
-        for (p, rect, kind) in new_inks {
+        for (p, rect, kind, tag) in new_inks {
             let seed = self.rng.next();
             let max_r = br * self.rng.range(0.5, 0.9);
             self.inks.push(Ink {
@@ -419,6 +478,7 @@ impl Octopus {
                 max_r,
                 seed,
                 kind,
+                tag,
             });
         }
         if self.inks.len() > 60 {
@@ -429,9 +489,11 @@ impl Octopus {
 
     // -- rendering ----------------------------------------------------------
 
+    /// In document mode the caller paints the captured page first; this draws
+    /// the reading on top of it.
     pub fn draw(&self, c: &CanvasRenderingContext2d) {
-        c.clear_rect(0.0, 0.0, self.w, self.h);
         if !self.has_doc {
+            c.clear_rect(0.0, 0.0, self.w, self.h);
             set_fill(c, "#05070f");
             c.fill_rect(0.0, 0.0, self.w, self.h);
             c.set_global_alpha(0.10);
@@ -443,11 +505,14 @@ impl Octopus {
         self.draw_targets(c);
         self.draw_inks(c);
         if self.has_doc {
+            self.draw_scanline(c);
             self.draw_focus(c);
         }
         self.draw_arms(c);
         self.draw_body(c);
-        if !self.has_doc {
+        if self.has_doc {
+            self.draw_tags(c);
+        } else {
             self.draw_caption(c);
         }
     }
@@ -458,15 +523,15 @@ impl Octopus {
                 continue;
             }
             if self.has_doc {
-                // faint cyan underline on the real link/heading being eyed
+                // a barely-there dotted hint under each line still to be read
                 let [x, y, w, h] = t.rect;
-                c.set_global_alpha(0.28);
-                set_stroke(c, "#2ad4ff");
-                c.set_line_width(1.5);
-                c.begin_path();
-                c.move_to(x, y + h + 1.5);
-                c.line_to(x + w, y + h + 1.5);
-                c.stroke();
+                c.set_global_alpha(0.22);
+                set_fill(c, "#2ad4ff");
+                let mut dx = 0.0;
+                while dx < w {
+                    c.fill_rect(x + dx, y + h + 1.0, 1.5, 1.0);
+                    dx += 5.0;
+                }
             } else {
                 set_stroke(c, "#ff5a7a");
                 c.set_global_alpha(0.75);
@@ -484,30 +549,44 @@ impl Octopus {
             let grow = (ink.age / 0.45).min(1.0);
 
             if self.has_doc && ink.rect[2] > 2.0 {
-                // ink a real content box PRECISELY: a cyan "read" wash hugging the
-                // exact text (still legible), an underline sweeping in left-to-
-                // right like a finger tracing the line, and a tiny droplet where a
-                // tentacle touched. Headings read bolder than body prose.
+                // a highlighter stroke sweeping left-to-right over the exact line.
+                // "multiply" tints the paper and leaves the text dark, like a real
+                // marker; key facts get a bold amber stroke, headings a strong cyan,
+                // body prose a light one.
                 let [x, y, w, h] = ink.rect;
-                let g = ease_out(grow);
-                let (wash, uw, uline) = match ink.kind {
-                    1 => (0.20, 2.0, "#7febff"), // heading — stands out
-                    2 => (0.11, 1.4, "#35e0ff"), // body text
-                    _ => (0.10, 1.4, "#35e0ff"), // link
+                let dur = (0.22 + w / 1500.0).min(0.6);
+                let g = ease_out((ink.age / dur).min(1.0));
+                let key = ink.tag.is_some();
+                let (col, alpha, pad) = match (key, ink.kind) {
+                    (true, _) => ("#ffcc2e", 0.70, 2.5),
+                    (false, 1) => ("#4fd8ff", 0.46, 2.0),
+                    (false, 2) => ("#8de8ff", 0.30, 1.2),
+                    _ => ("#b9a8ff", 0.30, 1.2),
                 };
-                c.set_global_alpha(wash * g);
-                set_fill(c, "#2ad4ff");
-                c.fill_rect(x, y, w, h);
-                c.set_global_alpha(0.9 * g);
-                set_stroke(c, uline);
-                c.set_line_width(uw);
+                let hx = x - pad;
+                let hy = y - pad * 0.6;
+                let hw = (w + pad * 2.0) * g;
+                let hh = h + pad * 1.2;
+                let _ = c.set_global_composite_operation("multiply");
+                c.set_global_alpha(alpha);
+                set_fill(c, col);
+                round_rect(c, hx, hy, hw, hh, 2.5);
+                c.fill();
+                let _ = c.set_global_composite_operation("source-over");
+                // the marker tip glows while it is still moving
+                if g < 1.0 {
+                    c.set_global_alpha(0.9 * (1.0 - g));
+                    set_fill(c, if key { "#fff0a8" } else { "#c9f6ff" });
+                    c.fill_rect(hx + hw - 2.0, hy - 1.0, 2.5, hh + 2.0);
+                }
+                // a crisp underline so the stroke also reads on dark pages
+                c.set_global_alpha(if key { 0.95 } else if ink.kind == 1 { 0.7 } else { 0.45 });
+                set_stroke(c, if key { "#ffb000" } else { "#2ad4ff" });
+                c.set_line_width(if key { 2.0 } else if ink.kind == 1 { 1.6 } else { 1.0 });
                 c.begin_path();
-                c.move_to(x, y + h);
-                c.line_to(x + w * (0.2 + 0.8 * g), y + h);
+                c.move_to(hx, y + h + 1.5);
+                c.line_to(hx + hw, y + h + 1.5);
                 c.stroke();
-                c.set_global_alpha(0.55 * g);
-                set_fill(c, "#0a1c3e");
-                circle(c, ink.pos.x, ink.pos.y, 2.0 + 1.3 * g);
             } else {
                 let r = ink.max_r * ease_out(grow);
                 let settle = if ink.age > 0.45 { 0.34 } else { 0.6 };
@@ -522,6 +601,62 @@ impl Octopus {
                     circle(c, ink.pos.x + a.cos() * dd, ink.pos.y + a.sin() * dd, rr * grow);
                 }
             }
+        }
+        c.set_global_alpha(1.0);
+    }
+
+    /// A reading line that glides down the page with a soft trailing glow.
+    fn draw_scanline(&self, c: &CanvasRenderingContext2d) {
+        if self.read_cursor >= self.targets.len() {
+            return;
+        }
+        let y = self.scan_y;
+        let band = c.create_linear_gradient(0.0, y - 28.0, 0.0, y);
+        let _ = band.add_color_stop(0.0, "rgba(42,212,255,0)");
+        let _ = band.add_color_stop(1.0, "rgba(42,212,255,0.13)");
+        c.set_global_alpha(1.0);
+        c.set_fill_style(band.as_ref());
+        c.fill_rect(0.0, y - 28.0, self.w, 28.0);
+        let line = c.create_linear_gradient(0.0, 0.0, self.w, 0.0);
+        let _ = line.add_color_stop(0.0, "rgba(53,224,255,0)");
+        let _ = line.add_color_stop(0.5, "rgba(53,224,255,0.85)");
+        let _ = line.add_color_stop(1.0, "rgba(53,224,255,0)");
+        c.set_fill_style(line.as_ref());
+        c.fill_rect(0.0, y - 0.75, self.w, 1.5);
+    }
+
+    /// Margin tags on key facts — what she decided matters on this page.
+    fn draw_tags(&self, c: &CanvasRenderingContext2d) {
+        c.set_font("600 10px 'IBM Plex Mono', ui-monospace, monospace");
+        for ink in &self.inks {
+            let Some(tag) = ink.tag else { continue };
+            let pop = ease_out(((ink.age - 0.2) / 0.35).clamp(0.0, 1.0));
+            if pop <= 0.0 {
+                continue;
+            }
+            let [x, y, w, h] = ink.rect;
+            let tw = tag.chars().count() as f64 * 6.1 + 12.0;
+            let th = 15.0;
+            let cy = y + h * 0.5 - th * 0.5;
+            // prefer the right margin, then the left one, else just above the line
+            let (bx, by) = if x + w + 10.0 + tw < self.w - 4.0 {
+                (x + w + 10.0, cy)
+            } else if x - tw - 10.0 > 4.0 {
+                (x - tw - 10.0, cy)
+            } else {
+                ((x).max(4.0).min(self.w - tw - 4.0), (y - th - 3.0).max(2.0))
+            };
+            let lift = (1.0 - pop) * 5.0;
+            c.set_global_alpha(pop);
+            c.save();
+            c.set_shadow_blur(10.0);
+            c.set_shadow_color("rgba(255,184,0,0.55)");
+            set_fill(c, "#ffcc2e");
+            round_rect(c, bx, by + lift, tw, th, 3.0);
+            c.fill();
+            c.restore();
+            set_fill(c, "#1d1400");
+            let _ = c.fill_text(tag, bx + 6.0, by + lift + 11.0);
         }
         c.set_global_alpha(1.0);
     }
@@ -669,6 +804,21 @@ fn set_fill(c: &CanvasRenderingContext2d, s: &str) {
 fn set_stroke(c: &CanvasRenderingContext2d, s: &str) {
     c.set_stroke_style(&wasm_bindgen::JsValue::from_str(s));
 }
+fn round_rect(c: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
+    c.begin_path();
+    c.move_to(x + r, y);
+    c.line_to(x + w - r, y);
+    let _ = c.arc_to(x + w, y, x + w, y + r, r);
+    c.line_to(x + w, y + h - r);
+    let _ = c.arc_to(x + w, y + h, x + w - r, y + h, r);
+    c.line_to(x + r, y + h);
+    let _ = c.arc_to(x, y + h, x, y + h - r, r);
+    c.line_to(x, y + r);
+    let _ = c.arc_to(x, y, x + r, y, r);
+    c.close_path();
+}
+
 fn circle(c: &CanvasRenderingContext2d, x: f64, y: f64, r: f64) {
     c.begin_path();
     let _ = c.arc(x, y, r.max(0.1), 0.0, std::f64::consts::TAU);

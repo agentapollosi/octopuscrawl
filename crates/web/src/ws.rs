@@ -6,8 +6,7 @@ use gloo_net::http::Request;
 use gloo_net::websocket::{futures::WebSocket, Message};
 use octopuscrawl_core::{
     Crawler, DatasetMeta, Edge, GraphSnapshot, LedgerEntry, LiveMsg, Stats, TreasurySnapshot,
-    VocabStats, WebNode,
-};
+    VocabStats, WebNode, HistPoint, SponsorView};
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -49,6 +48,15 @@ pub struct Sample {
     pub running: u32,
 }
 
+/// One entry in the live reading feed.
+#[derive(Clone)]
+pub struct FeedItem {
+    pub id: u64,
+    pub host: String,
+    pub chapter: String,
+    pub tokens: u32,
+}
+
 /// All live state, held as copyable signals so components can share it freely.
 #[derive(Clone, Copy)]
 pub struct Live {
@@ -66,6 +74,12 @@ pub struct Live {
     pub dataset: RwSignal<Option<DatasetMeta>>,
     /// Live on-chain treasury wallet state.
     pub treasury: RwSignal<Option<TreasurySnapshot>>,
+    /// Live reading feed (newest first) for the activity ticker.
+    pub feed: RwSignal<Vec<FeedItem>>,
+    /// The dataset's growth over the last 24h, sampled server-side each minute.
+    pub growth: RwSignal<Vec<HistPoint>>,
+    /// Sponsored hatchlings and what they have added.
+    pub sponsors: RwSignal<Vec<SponsorView>>,
 }
 
 impl Live {
@@ -82,8 +96,17 @@ impl Live {
             vocab: RwSignal::new(None),
             dataset: RwSignal::new(None),
             treasury: RwSignal::new(None),
+            feed: RwSignal::new(Vec::new()),
+            growth: RwSignal::new(Vec::new()),
+            sponsors: RwSignal::new(Vec::new()),
         }
     }
+}
+
+fn next_feed_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(1);
+    N.fetch_add(1, Ordering::Relaxed)
 }
 
 fn push_sample(live: &Live, s: &Stats) {
@@ -153,6 +176,16 @@ fn apply(live: &Live, m: LiveMsg) {
                 v.insert(0, line);
                 v.truncate(14);
             });
+            let item = FeedItem {
+                id: next_feed_id(),
+                host: node.domain.clone(),
+                chapter: node.chapter.clone().unwrap_or_default(),
+                tokens: node.tokens,
+            };
+            live.feed.update(|v| {
+                v.insert(0, item);
+                v.truncate(12);
+            });
             ingest_page(live, node, edge);
         }
         LiveMsg::Ledger { entry } => live.ledger.update(|v| {
@@ -202,6 +235,22 @@ pub fn start_feeds(live: Live) {
     });
     spawn_local(async move {
         loop {
+            refresh_sponsors(live).await;
+            gloo_timers::future::TimeoutFuture::new(10_000).await;
+        }
+    });
+    spawn_local(async move {
+        loop {
+            if let Ok(resp) = Request::get(&format!("{}/v1/history?hours=24", http_base())).send().await {
+                if let Ok(h) = resp.json::<Vec<HistPoint>>().await {
+                    live.growth.set(h);
+                }
+            }
+            gloo_timers::future::TimeoutFuture::new(60_000).await;
+        }
+    });
+    spawn_local(async move {
+        loop {
             if let Ok(resp) = Request::get(&format!("{}/v1/vocab", http_base())).send().await {
                 if let Ok(v) = resp.json::<VocabStats>().await {
                     live.vocab.set(Some(v));
@@ -220,4 +269,13 @@ pub fn start_feeds(live: Live) {
             gloo_timers::future::TimeoutFuture::new(5000).await;
         }
     });
+}
+
+/// Re-read the sponsored hatchlings (also called right after a spawn).
+pub async fn refresh_sponsors(live: Live) {
+    if let Ok(resp) = Request::get(&format!("{}/v1/sponsors", http_base())).send().await {
+        if let Ok(v) = resp.json::<Vec<SponsorView>>().await {
+            live.sponsors.set(v);
+        }
+    }
 }
